@@ -1,3 +1,20 @@
+/**
+ * @file compact_wifi_board_s3cam.cc
+ * @brief bread-compact-wifi-s3cam 板级的具体实现。
+ * @author 78
+ * @date 2024-07-20
+ * 
+ * @details
+ * 该文件定义了 `CompactWifiBoardS3Cam` 类，它继承自 `WifiBoard`，
+ * 实现了特定于 "面包板 + ESP32-S3-CAM + LCD" 硬件组合的初始化逻辑。
+ * 主要包括：
+ * 1. SPI 总线初始化 (用于屏幕)
+ * 2. LCD 显示屏初始化
+ * 3. DVP 摄像头初始化
+ * 4. 板载按钮初始化
+ * 5. 提供获取 LED、音频编解码器、显示屏、背光和摄像头实例的接口。
+ */
+
 #include "wifi_board.h"
 #include "codecs/no_audio_codec.h"
 #include "display/lcd_display.h"
@@ -18,12 +35,14 @@
 #include <esp_lcd_panel_ops.h>
 #include <driver/spi_common.h>
 
+// 根据 menuconfig 中选择的 LCD 类型，包含对应的驱动头文件
 #if defined(LCD_TYPE_ILI9341_SERIAL)
 #include "esp_lcd_ili9341.h"
 #endif
 
 #if defined(LCD_TYPE_GC9A01_SERIAL)
 #include "esp_lcd_gc9a01.h"
+// GC9A01/GC9107 屏幕的厂商特定初始化指令序列
 static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
     //  {cmd, { data }, data_size, delay_ms}
     {0xfe, (uint8_t[]){0x00}, 0, 0},
@@ -61,82 +80,97 @@ static const gc9a01_lcd_init_cmd_t gc9107_lcd_init_cmds[] = {
  
 #define TAG "CompactWifiBoardS3Cam"
 
+/**
+ * @brief CompactWifiBoardS3Cam 类的定义，代表一个带摄像头的面包板 WiFi 开发板。
+ */
 class CompactWifiBoardS3Cam : public WifiBoard {
 private:
- 
-    Button boot_button_;
-    LcdDisplay* display_;
-     Esp32Camera* camera_;
+    Button boot_button_;      // GPIO0 上的启动/功能按钮
+    LcdDisplay* display_;     // LCD 显示屏对象指针
+    Esp32Camera* camera_;     // 摄像头对象指针
 
+    /**
+     * @brief 初始化用于 LCD 的 SPI 总线。
+     */
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num = DISPLAY_MOSI_PIN;
-        buscfg.miso_io_num = GPIO_NUM_NC;
+        buscfg.miso_io_num = GPIO_NUM_NC; // MISO 不使用
         buscfg.sclk_io_num = DISPLAY_CLK_PIN;
         buscfg.quadwp_io_num = GPIO_NUM_NC;
         buscfg.quadhd_io_num = GPIO_NUM_NC;
-        buscfg.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
+        buscfg.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t); // 最大传输大小
+        // 初始化 SPI3 主机，使用 DMA
         ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
+    /**
+     * @brief 初始化 LCD 显示屏。
+     */
     void InitializeLcdDisplay() {
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
-        // 液晶屏控制IO初始化
+        
+        // 1. 配置并创建 SPI IO 句柄
         ESP_LOGD(TAG, "Install panel IO");
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num = DISPLAY_CS_PIN;
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
         io_config.spi_mode = DISPLAY_SPI_MODE;
-        io_config.pclk_hz = 40 * 1000 * 1000;
+        io_config.pclk_hz = 40 * 1000 * 1000; // SPI 时钟频率 40MHz
         io_config.trans_queue_depth = 10;
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io));
 
-        // 初始化液晶屏驱动芯片
+        // 2. 配置并创建 LCD 驱动面板句柄
         ESP_LOGD(TAG, "Install LCD driver");
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = DISPLAY_RST_PIN;
         panel_config.rgb_ele_order = DISPLAY_RGB_ORDER;
         panel_config.bits_per_pixel = 16;
+
+        // 根据 menuconfig 的选择，实例化不同的 LCD 驱动
 #if defined(LCD_TYPE_ILI9341_SERIAL)
         ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(panel_io, &panel_config, &panel));
 #elif defined(LCD_TYPE_GC9A01_SERIAL)
         ESP_ERROR_CHECK(esp_lcd_new_panel_gc9a01(panel_io, &panel_config, &panel));
+        // 如果是 GC9A01，则应用特定的厂商初始化指令
         gc9a01_vendor_config_t gc9107_vendor_config = {
             .init_cmds = gc9107_lcd_init_cmds,
             .init_cmds_size = sizeof(gc9107_lcd_init_cmds) / sizeof(gc9a01_lcd_init_cmd_t),
         };        
 #else
+        // 默认使用 ST7789 驱动
         ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel));
 #endif
         
-        esp_lcd_panel_reset(panel);
+        // 3. 初始化并配置 LCD 面板
+        esp_lcd_panel_reset(panel); // 复位 LCD
+        esp_lcd_panel_init(panel);  // 初始化
+        esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR); // 设置颜色反转
+        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);           // 交换 XY 坐标
+        esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y); // 设置镜像
 
-        esp_lcd_panel_init(panel);
-        esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR);
-        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
-        esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 #ifdef  LCD_TYPE_GC9A01_SERIAL
+        // 注入厂商特定配置
         panel_config.vendor_config = &gc9107_vendor_config;
 #endif
+        // 4. 创建 LcdDisplay 实例以供上层应用使用
         display_ = new SpiLcdDisplay(panel_io, panel,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
+    /**
+     * @brief 初始化 DVP 摄像头。
+     */
     void InitializeCamera() {
+        // 1. 配置摄像头 DVP 接口的引脚
         static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
-            .data_width = CAM_CTLR_DATA_WIDTH_8,
+            .data_width = CAM_CTLR_DATA_WIDTH_8, // 8位数据宽度
             .data_io = {
-                [0] = CAMERA_PIN_D0,
-                [1] = CAMERA_PIN_D1,
-                [2] = CAMERA_PIN_D2,
-                [3] = CAMERA_PIN_D3,
-                [4] = CAMERA_PIN_D4,
-                [5] = CAMERA_PIN_D5,
-                [6] = CAMERA_PIN_D6,
-                [7] = CAMERA_PIN_D7,
+                [0] = CAMERA_PIN_D0, [1] = CAMERA_PIN_D1, [2] = CAMERA_PIN_D2, [3] = CAMERA_PIN_D3,
+                [4] = CAMERA_PIN_D4, [5] = CAMERA_PIN_D5, [6] = CAMERA_PIN_D6, [7] = CAMERA_PIN_D7,
             },
             .vsync_io = CAMERA_PIN_VSYNC,
             .de_io = CAMERA_PIN_HREF,
@@ -144,6 +178,7 @@ private:
             .xclk_io = CAMERA_PIN_XCLK,
         };
 
+        // 2. 配置摄像头 SCCB (I2C) 接口
         esp_video_init_sccb_config_t sccb_config = {
             .init_sccb = true,
             .i2c_config = {
@@ -151,9 +186,10 @@ private:
                 .scl_pin = CAMERA_PIN_SIOC,
                 .sda_pin = CAMERA_PIN_SIOD,
             },
-            .freq = 100000,
+            .freq = 100000, // I2C 时钟频率
         };
 
+        // 3. 组合 DVP 和 SCCB 配置
         esp_video_init_dvp_config_t dvp_config = {
             .sccb_config = sccb_config,
             .reset_pin = CAMERA_PIN_RESET,
@@ -162,57 +198,87 @@ private:
             .xclk_freq = XCLK_FREQ_HZ,
         };
 
+        // 4. 创建视频初始化总配置
         esp_video_init_config_t video_config = {
             .dvp = &dvp_config,
         };
 
+        // 5. 创建 Esp32Camera 实例
         camera_ = new Esp32Camera(video_config);
-        camera_->SetHMirror(false);
+        camera_->SetHMirror(false); // 设置水平不镜像
     }
 
+    /**
+     * @brief 初始化板载按钮。
+     */
     void InitializeButtons() {
+        // 为启动按钮注册一个点击事件回调
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
+            // 如果设备正在启动且 WiFi 未连接，则长按此按钮可重置 WiFi 配置
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 ResetWifiConfiguration();
             }
+            // 切换聊天状态（开始/停止录音）
             app.ToggleChatState();
         });
     }
 
 public:
+    /**
+     * @brief CompactWifiBoardS3Cam 类的构造函数。
+     * 在这里按顺序调用各个外设的初始化函数。
+     */
     CompactWifiBoardS3Cam() :
         boot_button_(BOOT_BUTTON_GPIO) {
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        // 如果定义了背光引脚，则恢复上次保存的亮度
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
-        
     }
 
+    /**
+     * @brief 获取板载 LED 的实例。
+     * @return Led* 指向 LED 实例的指针。
+     */
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
     }
 
+    /**
+     * @brief 获取音频编解码器的实例。
+     * @return AudioCodec* 指向音频编解码器实例的指针。
+     */
     virtual AudioCodec* GetAudioCodec() override {
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
+        // 单工模式：麦克风和扬声器使用不同的 I2S 引脚
         static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN);
 #else
+        // 双工模式：麦克风和扬声器共享部分 I2S 引脚
         static NoAudioCodecDuplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN);
 #endif
         return &audio_codec;
     }
 
+    /**
+     * @brief 获取显示屏的实例。
+     * @return Display* 指向显示屏实例的指针。
+     */
     virtual Display* GetDisplay() override {
         return display_;
     }
 
+    /**
+     * @brief 获取背光控制的实例。
+     * @return Backlight* 指向背光控制实例的指针。
+     */
     virtual Backlight* GetBacklight() override {
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
@@ -221,9 +287,14 @@ public:
         return nullptr;
     }
 
+    /**
+     * @brief 获取摄像头的实例。
+     * @return Camera* 指向摄像头实例的指针。
+     */
     virtual Camera* GetCamera() override {
         return camera_;
     }
 };
 
+// 宏，用于在板型列表中声明并注册该板型
 DECLARE_BOARD(CompactWifiBoardS3Cam);

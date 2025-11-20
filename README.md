@@ -121,6 +121,11 @@ v1 的稳定版本为 1.9.2，可以通过 `git checkout v1` 来切换到 v1 版
 
 ### 开发者文档
 
+- [项目总览](docs/项目总览.md) - 架构、入口与依赖综述
+- [硬件接线-面包板摄像头](docs/硬件接线-面包板摄像头.md) - 摄像头/显示/音频引脚与源码定位
+- [ESP32S3 面包板S3CAM引脚对照](docs/ESP32S3_面包板S3CAM引脚对照.md) - 引脚占用与能力对照，源码行号标注
+- [开发与构建](docs/开发与构建.md) - 环境、menuconfig、资源与 OTA、常见问题
+- [通信协议简述](docs/通信协议简述.md) - MQTT+UDP 与 WebSocket 的握手与流管线
 - [自定义开发板指南](docs/custom-board.md) - 学习如何为小智 AI 创建自定义开发板
 - [MCP 协议物联网控制用法说明](docs/mcp-usage.md) - 了解如何通过 MCP 协议控制物联网设备
 - [MCP 协议交互流程](docs/mcp-protocol.md) - 设备端 MCP 协议的实现方式

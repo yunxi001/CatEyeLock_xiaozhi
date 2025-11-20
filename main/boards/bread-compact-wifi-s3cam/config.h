@@ -3,64 +3,77 @@
 
 #include <driver/gpio.h>
 
-#define AUDIO_INPUT_SAMPLE_RATE  16000
-#define AUDIO_OUTPUT_SAMPLE_RATE 24000
+// ========================== 音频配置 ==========================
+#define AUDIO_INPUT_SAMPLE_RATE  16000 // 音频输入（麦克风）采样率
+#define AUDIO_OUTPUT_SAMPLE_RATE 24000 // 音频输出（扬声器）采样率
 
-// 如果使用 Duplex I2S 模式，请注释下面一行
+// 定义 I2S 的工作模式。Simplex 为单工模式，麦克风和扬声器使用独立的 I2S 时钟线。
+// 如果使用 Duplex (双工) I2S 模式，请注释下面一行。
 #define AUDIO_I2S_METHOD_SIMPLEX
 
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
+// --- 单工 I2S 模式引脚定义 ---
+// 麦克风 I2S 引脚
+#define AUDIO_I2S_MIC_GPIO_WS   GPIO_NUM_1  // Word Select
+#define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_2  // Serial Clock
+#define AUDIO_I2S_MIC_GPIO_DIN  GPIO_NUM_42 // Serial Data In
 
-#define AUDIO_I2S_MIC_GPIO_WS   GPIO_NUM_1
-#define AUDIO_I2S_MIC_GPIO_SCK  GPIO_NUM_2
-#define AUDIO_I2S_MIC_GPIO_DIN  GPIO_NUM_42
-#define AUDIO_I2S_SPK_GPIO_DOUT GPIO_NUM_39
-#define AUDIO_I2S_SPK_GPIO_BCLK GPIO_NUM_40
-#define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_41
+// 扬声器 I2S 引脚
+#define AUDIO_I2S_SPK_GPIO_DOUT GPIO_NUM_39 // Serial Data Out
+#define AUDIO_I2S_SPK_GPIO_BCLK GPIO_NUM_40 // Bit Clock
+#define AUDIO_I2S_SPK_GPIO_LRCK GPIO_NUM_41 // Left/Right Clock
 
 #else
-
-#define AUDIO_I2S_GPIO_WS GPIO_NUM_4
-#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_5
-#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_6
-#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_7
+// --- 双工 I2S 模式引脚定义 ---
+#define AUDIO_I2S_GPIO_WS   GPIO_NUM_4  // Word Select (LRCK)
+#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_5  // Bit Clock (SCK)
+#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_6  // Serial Data In (MIC)
+#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_7  // Serial Data Out (Speaker)
 
 #endif
 
 
-#define BUILTIN_LED_GPIO        GPIO_NUM_48
-#define BOOT_BUTTON_GPIO        GPIO_NUM_0
-#define TOUCH_BUTTON_GPIO       GPIO_NUM_NC
-#define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_NC
-#define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_NC
+// ========================== 板载元件引脚定义 ==========================
+#define BUILTIN_LED_GPIO        GPIO_NUM_48 // 板载 LED 引脚
+#define BOOT_BUTTON_GPIO        GPIO_NUM_0  // 启动/功能按钮引脚 (Strapping Pin)
+#define TOUCH_BUTTON_GPIO       GPIO_NUM_NC // 触摸按钮 (未连接)
+#define VOLUME_UP_BUTTON_GPIO   GPIO_NUM_NC // 音量加 (未连接)
+#define VOLUME_DOWN_BUTTON_GPIO GPIO_NUM_NC // 音量减 (未连接)
 
-//Camera Config
-#define CAMERA_PIN_D0 GPIO_NUM_11
-#define CAMERA_PIN_D1 GPIO_NUM_9
-#define CAMERA_PIN_D2 GPIO_NUM_8
-#define CAMERA_PIN_D3 GPIO_NUM_10
-#define CAMERA_PIN_D4 GPIO_NUM_12
-#define CAMERA_PIN_D5 GPIO_NUM_18
-#define CAMERA_PIN_D6 GPIO_NUM_17
-#define CAMERA_PIN_D7 GPIO_NUM_16
-#define CAMERA_PIN_XCLK GPIO_NUM_15
-#define CAMERA_PIN_PCLK GPIO_NUM_13
-#define CAMERA_PIN_VSYNC GPIO_NUM_6
-#define CAMERA_PIN_HREF GPIO_NUM_7
-#define CAMERA_PIN_SIOC GPIO_NUM_5
-#define CAMERA_PIN_SIOD GPIO_NUM_4
-#define CAMERA_PIN_PWDN GPIO_NUM_NC
-#define CAMERA_PIN_RESET GPIO_NUM_NC
-#define XCLK_FREQ_HZ 20000000
+// ========================== 摄像头 (DVP 接口) 引脚定义 ==========================
+#define CAMERA_PIN_D0 GPIO_NUM_11      // 摄像头数据引脚 0
+#define CAMERA_PIN_D1 GPIO_NUM_9       // 摄像头数据引脚 1
+#define CAMERA_PIN_D2 GPIO_NUM_8       // 摄像头数据引脚 2
+#define CAMERA_PIN_D3 GPIO_NUM_10      // 摄像头数据引脚 3
+#define CAMERA_PIN_D4 GPIO_NUM_12      // 摄像头数据引脚 4
+#define CAMERA_PIN_D5 GPIO_NUM_18      // 摄像头数据引脚 5
+#define CAMERA_PIN_D6 GPIO_NUM_17      // 摄像头数据引脚 6
+#define CAMERA_PIN_D7 GPIO_NUM_16      // 摄像头数据引脚 7
+#define CAMERA_PIN_XCLK GPIO_NUM_15    // 摄像头外部时钟 (XCLK)
+#define CAMERA_PIN_PCLK GPIO_NUM_13    // 摄像头像素时钟 (PCLK)
+#define CAMERA_PIN_VSYNC GPIO_NUM_6    // 垂直同步信号
+#define CAMERA_PIN_HREF GPIO_NUM_7     // 水平参考信号
+#define CAMERA_PIN_SIOC GPIO_NUM_5     // SCCB (I2C) 时钟
+#define CAMERA_PIN_SIOD GPIO_NUM_4     // SCCB (I2C) 数据
+#define CAMERA_PIN_PWDN GPIO_NUM_NC    // 电源使能 (未连接)
+#define CAMERA_PIN_RESET GPIO_NUM_NC   // 复位 (未连接)
+#define XCLK_FREQ_HZ 20000000           // 摄像头外部时钟频率 (20MHz)
 
 
-#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_38
-#define DISPLAY_MOSI_PIN      GPIO_NUM_20
-#define DISPLAY_CLK_PIN       GPIO_NUM_19
-#define DISPLAY_DC_PIN        GPIO_NUM_47
-#define DISPLAY_RST_PIN       GPIO_NUM_21
-#define DISPLAY_CS_PIN        GPIO_NUM_45
+// ========================== 显示屏 (SPI 接口) 引脚定义 ==========================
+#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_38 // 背光控制引脚
+#define DISPLAY_MOSI_PIN      GPIO_NUM_20 // SPI MOSI (数据)
+#define DISPLAY_CLK_PIN       GPIO_NUM_19 // SPI CLK (时钟)
+#define DISPLAY_DC_PIN        GPIO_NUM_47 // 数据/命令控制
+#define DISPLAY_RST_PIN       GPIO_NUM_21 // 复位
+#define DISPLAY_CS_PIN        GPIO_NUM_45 // 片选
 
+
+// =================================================================================
+// ========================== 多种 LCD 屏幕适配 =====================================
+// =================================================================================
+// 以下配置块使用 menuconfig 中选择的屏幕型号 (CONFIG_LCD_...) 来定义屏幕的物理参数和驱动行为。
+// 只有被选中的屏幕型号所对应的 #ifdef 块会参与编译。
 
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL
@@ -302,7 +315,8 @@
 #endif
 
 
-// A MCP Test: Control a lamp
+// ========================== 其他定义 ==========================
+// 一个用于 MCP 协议测试的 GPIO，用于控制一个灯
 #define LAMP_GPIO GPIO_NUM_14
 
 #endif // _BOARD_CONFIG_H_
