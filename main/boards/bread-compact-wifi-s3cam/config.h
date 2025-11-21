@@ -10,7 +10,9 @@
 // 定义 I2S 的工作模式。Simplex 为单工模式，麦克风和扬声器使用独立的 I2S 时钟线。
 // 如果使用 Duplex (双工) I2S 模式，请注释下面一行。
 #define AUDIO_I2S_METHOD_SIMPLEX
-
+//使用屏幕为ST7789的240x320
+#define CONFIG_LCD_ST7789_240X320
+// ========================== 音频引脚定义 ==========================
 #ifdef AUDIO_I2S_METHOD_SIMPLEX
 // --- 单工 I2S 模式引脚定义 ---
 // 麦克风 I2S 引脚
