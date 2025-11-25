@@ -589,7 +589,7 @@ void Application::Start() {
                         display->SetChatMessage("assistant", message.c_str());
                     });
                 }
-            }
+            } 
         } else if (strcmp(type->valuestring, "stt") == 0) { // 语音转文本消息
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
