@@ -64,7 +64,6 @@ idf.py flash
 
 ## 重要文档
 
--   docs\my_docs\smart_cat_eye_implementation_plan.md
 -   docs\my_docs\bread_compact_wifi_s3cam_analysis.md
 -   docs\my_docs\bread_compact_wifi_s3cam_pin_details.md
 -   docs\my_docs\camera_module_analysis.md
