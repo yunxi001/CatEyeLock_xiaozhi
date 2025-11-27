@@ -71,12 +71,29 @@ bool WebsocketProtocol::SendText(const std::string& text) {
     return true;
 }
 
+// 实现 SetStreamingMode 方法
+void WebsocketProtocol::SetStreamingMode(bool enabled) {
+    streaming_av_mode_ = enabled;
+    ESP_LOGI(TAG, "Streaming AV mode set to: %s", enabled ? "true" : "false");
+}
+
+// 实现 SendBinary 方法
+bool WebsocketProtocol::SendBinary(const uint8_t* data, size_t len) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    return websocket_->Send(data, len, true); // 作为二进制帧发送
+}
+
+
 bool WebsocketProtocol::IsAudioChannelOpened() const {
     return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
 void WebsocketProtocol::CloseAudioChannel() {
     websocket_.reset();
+    // 确保在关闭音频通道时也关闭流模式
+    streaming_av_mode_ = false; 
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
@@ -110,56 +127,79 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
-            if (on_incoming_audio_ != nullptr) {
-                if (version_ == 2) {
-                    BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
-                    bp2->version = ntohs(bp2->version);
-                    bp2->type = ntohs(bp2->type);
-                    bp2->timestamp = ntohl(bp2->timestamp);
-                    bp2->payload_size = ntohl(bp2->payload_size);
-                    auto payload = (uint8_t*)bp2->payload;
+            if (streaming_av_mode_) { // 如果处于音视频流模式，所有二进制数据都视为音频
+                if (on_incoming_audio_ != nullptr) {
+                    // 在AV流模式下，假设直接接收裸音频数据或预定格式
+                    // 这里简化处理，直接将接收到的二进制数据封装为 AudioStreamPacket
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = bp2->timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
-                    }));
-                } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
-                    }));
-                } else {
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
+                        .sample_rate = server_sample_rate_, // 沿用协议协商的采样率
+                        .frame_duration = server_frame_duration_, // 沿用协议协商的帧时长
+                        .timestamp = 0, // AV流模式下时间戳可能由流本身提供或不严格要求
                         .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
                     }));
                 }
-            }
-        } else {
-            // Parse JSON data
-            auto root = cJSON_Parse(data);
-            auto type = cJSON_GetObjectItem(root, "type");
-            if (cJSON_IsString(type)) {
-                if (strcmp(type->valuestring, "hello") == 0) {
-                    ParseServerHello(root);
-                } else {
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
+            } else { // 否则，按照原有逻辑处理（TTS或聊天音频）
+                if (on_incoming_audio_ != nullptr) {
+                    if (version_ == 2) {
+                        BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
+                        bp2->version = ntohs(bp2->version);
+                        bp2->type = ntohs(bp2->type);
+                        bp2->timestamp = ntohl(bp2->timestamp);
+                        bp2->payload_size = ntohl(bp2->payload_size);
+                        auto payload = (uint8_t*)bp2->payload;
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = bp2->timestamp,
+                            .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
+                        }));
+                    } else if (version_ == 3) {
+                        BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
+                        bp3->type = bp3->type;
+                        bp3->payload_size = ntohs(bp3->payload_size);
+                        auto payload = (uint8_t*)bp3->payload;
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = 0,
+                            .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
+                        }));
+                    } else {
+                        on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = 0,
+                            .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+                        }));
                     }
                 }
-            } else {
-                ESP_LOGE(TAG, "Missing message type, data: %s", data);
             }
-            cJSON_Delete(root);
+        } else { // Text frames (JSON)
+            if (streaming_av_mode_) {
+                // 在AV流模式下接收到文本帧，可能是停止流的命令或者意外数据
+                ESP_LOGW(TAG, "Received text frame in AV streaming mode, data: %s", data);
+            }
+            // 无论是否在流模式，都尝试解析JSON，以防是停止流等重要控制命令
+            auto root = cJSON_Parse(data);
+            if (root == nullptr) {
+                ESP_LOGE(TAG, "Failed to parse JSON data: %s", data);
+                // If it's not JSON, then it's an error. We don't want to crash.
+                // Just log and continue.
+            } else {
+                auto type = cJSON_GetObjectItem(root, "type");
+                if (cJSON_IsString(type)) {
+                    if (strcmp(type->valuestring, "hello") == 0) {
+                        ParseServerHello(root);
+                    } else {
+                        if (on_incoming_json_ != nullptr) {
+                            on_incoming_json_(root);
+                        }
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Missing message type, data: %s", data);
+                }
+                cJSON_Delete(root);
+            }
         }
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
@@ -169,6 +209,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
+        streaming_av_mode_ = false; // 断开连接时，自动退出流模式
     });
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);

@@ -20,6 +20,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "stm32_controller.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -193,10 +194,6 @@ void Application::CheckNewVersion(Ota& ota) {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
                 return;
             }
-
-<<<<<<< HEAD
-            // 显示重试信息
-=======
             char error_message[128];
             snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota.GetCheckVersionUrl().c_str());
             Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
@@ -520,6 +517,9 @@ void Application::Start() {
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
+
+    // 初始化 STM32 控制器
+    Stm32Controller::GetInstance().Initialize();
 
     // 根据 OTA 配置决定使用 MQTT 还是 WebSocket
     if (ota.HasMqttConfig()) {
@@ -1068,4 +1068,47 @@ void Application::SetAecMode(AecMode mode) {
  */
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
+}
+
+/**
+ * @brief 处理来自 STM32 的事件。
+ * @param json_payload 包含 STM32 事件信息的 JSON 字符串。
+ */
+void Application::HandleStm32Event(const std::string& json_payload) {
+    cJSON* root = cJSON_Parse(json_payload.c_str());
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse STM32 event JSON: %s", json_payload.c_str());
+        return;
+    }
+
+    cJSON* event_type = cJSON_GetObjectItem(root, "event");
+    if (cJSON_IsString(event_type)) {
+        std::string event_name = event_type->valuestring;
+        ESP_LOGI(TAG, "Received STM32 event: %s", event_name.c_str());
+
+        // 根据事件名称分发处理
+        if (event_name == "doorbell_pressed") {
+            // 触发人脸识别流程
+            ESP_LOGI(TAG, "Doorbell pressed, triggering face recognition flow.");
+            // 稍后实现 TriggerFaceRecognitionFlow()
+        } else if (event_name == "pir_detected") {
+            // 触发人脸识别流程
+            ESP_LOGI(TAG, "PIR detected, triggering face recognition flow.");
+            // 稍后实现 TriggerFaceRecognitionFlow()
+        } else if (event_name == "lock_tampered") {
+            // 触发警报上报服务器
+            ESP_LOGW(TAG, "Lock tampered! Reporting to server.");
+            // Alert("Warning", "Lock Tampered!", "alert_icon"); // Placeholder
+        } else if (event_name == "door_open_long") {
+            // 门长时间未关，上报服务器
+            ESP_LOGW(TAG, "Door open for too long! Reporting to server.");
+            // Alert("Warning", "Door open!", "alert_icon"); // Placeholder
+        } else {
+            ESP_LOGW(TAG, "Unknown STM32 event: %s", event_name.c_str());
+        }
+    } else {
+        ESP_LOGE(TAG, "STM32 event JSON missing 'event' field or not string.");
+    }
+
+    cJSON_Delete(root);
 }

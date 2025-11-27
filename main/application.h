@@ -112,6 +112,19 @@ public:
     /** @brief 获取音频服务对象的引用。 */
     AudioService& GetAudioService() { return audio_service_; }
 
+    /**
+     * @brief 处理来自 STM32 的事件。
+     * @param json_payload 包含 STM32 事件信息的 JSON 字符串。
+     */
+    void HandleStm32Event(const std::string& json_payload);
+
+    /**
+     * @brief 获取当前协议处理器的指针。
+     * @return Protocol* 指向当前协议处理器的指针。
+     */
+    Protocol* GetProtocol() { return protocol_.get(); }
+
+
 private:
     /** @brief 私有构造函数，用于单例模式。 */
     Application();

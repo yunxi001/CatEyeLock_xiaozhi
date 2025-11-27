@@ -30,13 +30,10 @@
 1.  打开 `smart_cat_eye/config.h` 文件。
 2.  在保留摄像头、屏幕等现有引脚配置的基础上，添加以下宏定义，用于和 STM32 通信及唤醒：
     ```c
-    // --- 与 STM32 通信 ---
+    // --- 与 STM32 通信 (使用 UART 唤醒) ---
     #define STM32_UART_PORT      UART_NUM_1
-    #define STM32_UART_TX_PIN    GPIO_NUM_3  // 示例引脚，请根据实际硬件修改
-    #define STM32_UART_RX_PIN    GPIO_NUM_46 // 示例引脚，请根据实际硬件修改
-
-    // --- 从 STM32 唤醒 ESP32 ---
-    #define WAKEUP_PIN_FROM_STM32 GPIO_NUM_14
+    #define STM32_UART_TX_PIN    GPIO_NUM_3  // TX -> STM32 RX
+    #define STM32_UART_RX_PIN    GPIO_NUM_14 // RX <- STM32 TX (从此引脚唤醒)
     ```
 
 ### 2.3. 任务：实现 STM32 通信模块
@@ -54,12 +51,12 @@
 此阶段的目标是实现产品的核心业务逻辑，并将其封装为 MCP 工具。
 
 ### 3.1. 任务：实现低功耗与唤醒逻辑
-1.  **睡眠**: 在 `Application::MainEventLoop` 或状态机中增加逻辑，当设备处于 `kDeviceStateIdle` 状态且一段时间（例如5秒）没有事件时，自动进入睡眠模式。
+1.  **睡眠**: 在 `Application::MainEventLoop` 或状态机中增加逻辑，当设备处于 `kDeviceStateIdle` 状态且一段时间（例如5秒）没有事件时，自动进入 **Light-sleep** 睡眠模式。
 2.  **唤醒源配置**: 在进入睡眠前，调用 ESP-IDF 提供的函数配置唤醒源：
-    - `esp_sleep_enable_ext0_wakeup(WAKEUP_PIN_FROM_STM32, 1)`: 配置 GPIO 外部唤醒。
+    - `esp_sleep_enable_uart_wakeup(STM32_UART_PORT)`: 配置 UART 串口唤醒。当 `STM32_UART_RX_PIN` (GPIO14) 上有数据时唤醒设备。
     - 保持项目中已有的语音唤醒在睡眠模式下可用。
 3.  **唤醒处理**: 在应用的唤醒入口处，通过 `esp_sleep_get_wakeup_cause()` 获取唤醒原因，并执行相应的业务流程：
-    - **GPIO 唤醒 (来自STM32)**: 调用 `Stm32Controller` 查询具体事件，然后触发人脸识别等流程。
+    - **UART 唤醒 (来自STM32)**: 调用 `Stm32Controller` 查询具体事件，然后触发人脸识别等流程。
     - **语音唤醒**: 触发人脸识别流程。
     - **服务器唤醒**: 执行服务器下发的指令。
 
