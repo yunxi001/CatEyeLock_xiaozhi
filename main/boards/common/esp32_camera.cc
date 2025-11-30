@@ -907,7 +907,8 @@ std::string Esp32Camera::Explain(const std::string& question) {
         throw std::runtime_error("Failed to create JPEG queue");
     }
 
-    // We spawn a thread to encode the image to JPEG using optimized encoder (cost about 500ms and 8KB SRAM)
+    // 我们使用优化编码器（耗时约500毫秒和8KB SRAM）来编码图像为JPEG，并为此创建一个线程。
+
     encoder_thread_ = std::thread([this, jpeg_queue]() {
         uint16_t w = frame_.width ? frame_.width : 320;
         uint16_t h = frame_.height ? frame_.height : 240;
@@ -1004,7 +1005,8 @@ std::string Esp32Camera::Explain(const std::string& question) {
         total_sent += chunk.len;
         heap_caps_free(chunk.data);
     }
-    // Wait for the encoder thread to finish
+    // 等待编码器线程完成
+
     encoder_thread_.join();
     // 清理队列
     vQueueDelete(jpeg_queue);
@@ -1031,7 +1033,8 @@ std::string Esp32Camera::Explain(const std::string& question) {
     std::string result = http->ReadAll();
     http->Close();
 
-    // Get remain task stack size
+    // 获取剩余任务栈大小
+
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
     ESP_LOGI(TAG, "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
              (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
