@@ -17,7 +17,11 @@ struct AudioStreamPacket {
 struct BinaryProtocol2 {
     uint16_t version;
     uint16_t type;          // Message type (0: OPUS, 1: JSON)
-    uint32_t reserved;      // Reserved for future use
+    uint32_t reserved;      // Reserved field: 
+                            // For OPUS (type=0): unused (0)
+                            // For VIDEO (type=0, reserved!=0): 
+                            //   - High 16 bits: width
+                            //   - Low 16 bits: height
     uint32_t timestamp;     // Timestamp in milliseconds (used for server-side AEC)
     uint32_t payload_size;  // Payload size in bytes
     uint8_t payload[];      // Payload data
@@ -68,6 +72,8 @@ public:
     virtual void CloseAudioChannel() = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
+    virtual bool SendVideo(const uint8_t* data, size_t size, uint32_t timestamp, 
+                          uint16_t width, uint16_t height) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();

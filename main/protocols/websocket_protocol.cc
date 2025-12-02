@@ -36,7 +36,7 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         auto bp2 = (BinaryProtocol2*)serialized.data();
         bp2->version = htons(version_);
         bp2->type = 0;
-        bp2->reserved = 0;
+        bp2->reserved = 0;  // Audio: reserved = 0
         bp2->timestamp = htonl(packet->timestamp);
         bp2->payload_size = htonl(packet->payload.size());
         memcpy(bp2->payload, packet->payload.data(), packet->payload.size());
@@ -54,6 +54,41 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         return websocket_->Send(serialized.data(), serialized.size(), true);
     } else {
         return websocket_->Send(packet->payload.data(), packet->payload.size(), true);
+    }
+}
+
+bool WebsocketProtocol::SendVideo(const uint8_t* data, size_t size, uint32_t timestamp, 
+                                   uint16_t width, uint16_t height) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        ESP_LOGW(TAG, "Cannot send video: websocket not connected");
+        return false;
+    }
+
+    if (version_ == 2) {
+        std::string serialized;
+        serialized.resize(sizeof(BinaryProtocol2) + size);
+        auto bp2 = (BinaryProtocol2*)serialized.data();
+        bp2->version = htons(version_);
+        bp2->type = 0;  // Type remains 0 (same as audio)
+        // Video: use reserved field to encode width and height
+        // High 16 bits: width, Low 16 bits: height
+        bp2->reserved = htonl(((uint32_t)width << 16) | (uint32_t)height);
+        bp2->timestamp = htonl(timestamp);
+        bp2->payload_size = htonl(size);
+        memcpy(bp2->payload, data, size);
+
+        ESP_LOGD(TAG, "Sending video frame: %dx%d, size=%zu, timestamp=%u", 
+                 width, height, size, timestamp);
+        return websocket_->Send(serialized.data(), serialized.size(), true);
+    } else if (version_ == 3) {
+        // Version 3 doesn't have enough space for video metadata
+        // Fall back to version 2 format or skip
+        ESP_LOGW(TAG, "Video not supported in protocol version 3");
+        return false;
+    } else {
+        // Version 1 doesn't support video
+        ESP_LOGW(TAG, "Video not supported in protocol version 1");
+        return false;
     }
 }
 

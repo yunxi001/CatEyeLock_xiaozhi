@@ -32,6 +32,8 @@ static const char* const STATE_STRINGS[] = {
     "activating",
     "audio_testing",
     "fatal_error",
+    "monitor_connecting",
+    "monitor_streaming",
     "invalid_state"
 };
 
@@ -525,6 +527,26 @@ void Application::Start() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "start_monitor") == 0) {
+                    // 启动监控模式
+                    Schedule([this]() {
+                        if (!IsMonitorMode()) {
+                            ESP_LOGI(TAG, "Starting monitor mode");
+                            if (StartMonitorMode()) {
+                                ESP_LOGI(TAG, "Monitor mode started successfully");
+                            } else {
+                                ESP_LOGE(TAG, "Failed to start monitor mode");
+                            }
+                        }
+                    });
+                } else if (strcmp(command->valuestring, "stop_monitor") == 0) {
+                    // 停止监控模式
+                    Schedule([this]() {
+                        if (IsMonitorMode()) {
+                            ESP_LOGI(TAG, "Stopping monitor mode");
+                            StopMonitorMode();
+                        }
+                    });
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -634,12 +656,8 @@ void Application::MainEventLoop() {
             // 每10秒打印调试信息
 
             if (clock_ticks_ % 10 == 0) {
-SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
-SystemInfo::PrintTaskList();" 翻译为中文（简体）为：
-
-"SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
-SystemInfo::PrintTaskList();" => 系统信息::打印任务CPU使用率(pdMS_TO_TICKS(1000));
-系统信息::打印任务列表();
+                SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
+                SystemInfo::PrintTaskList();
                 SystemInfo::PrintHeapStats();
             }
         }
@@ -947,4 +965,57 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
+}
+
+bool Application::StartMonitorMode() {
+    if (monitor_service_ && monitor_service_->IsRunning()) {
+        ESP_LOGW(TAG, "Monitor mode already running");
+        return false;
+    }
+
+    if (!protocol_) {
+        ESP_LOGE(TAG, "Protocol not initialized");
+        return false;
+    }
+
+    auto& board = Board::GetInstance();
+    auto camera = board.GetCamera();
+    if (!camera) {
+        ESP_LOGE(TAG, "Camera not available");
+        return false;
+    }
+
+    // 创建监控服务
+    monitor_service_ = std::make_unique<MonitorService>();
+    
+    // 设置状态变化回调
+    monitor_service_->SetStateChangeCallback([this](bool connected) {
+        if (connected) {
+            SetDeviceState(kDeviceStateMonitorStreaming);
+        } else {
+            SetDeviceState(kDeviceStateIdle);
+        }
+    });
+
+    // 启动监控服务
+    if (!monitor_service_->Start(protocol_.get(), camera, &audio_service_)) {
+        ESP_LOGE(TAG, "Failed to start monitor service");
+        monitor_service_.reset();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Monitor mode started");
+    return true;
+}
+
+void Application::StopMonitorMode() {
+    if (monitor_service_) {
+        monitor_service_->Stop();
+        monitor_service_.reset();
+        ESP_LOGI(TAG, "Monitor mode stopped");
+    }
+}
+
+bool Application::IsMonitorMode() const {
+    return monitor_service_ && monitor_service_->IsRunning();
 }

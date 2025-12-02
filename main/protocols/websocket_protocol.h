@@ -17,6 +17,8 @@ public:
 
     bool Start() override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
+    bool SendVideo(const uint8_t* data, size_t size, uint32_t timestamp, 
+                   uint16_t width, uint16_t height) override;
     bool OpenAudioChannel() override;
     void CloseAudioChannel() override;
     bool IsAudioChannelOpened() const override;

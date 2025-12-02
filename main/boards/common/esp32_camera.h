@@ -126,6 +126,33 @@ public:
      * @return std::string 服务器返回的JSON格式的分析结果。
      */
     virtual std::string Explain(const std::string& question) override;
+
+    /**
+     * @brief 捕获一帧JPEG图像用于监控模式
+     * @param jpeg_data 输出参数，指向JPEG数据的指针
+     * @param jpeg_size 输出参数，JPEG数据的大小
+     * @param quality JPEG压缩质量 (1-100)
+     * @return bool 如果捕获成功返回true
+     */
+    bool CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int quality = 80);
+
+    /**
+     * @brief 检查摄像头是否已初始化并可用
+     * @return bool 如果摄像头可用返回true
+     */
+    bool IsAvailable() const;
+
+    /**
+     * @brief 获取当前帧缓冲区的宽度
+     * @return uint16_t 帧宽度
+     */
+    uint16_t GetFrameWidth() const { return frame_.width; }
+
+    /**
+     * @brief 获取当前帧缓冲区的高度
+     * @return uint16_t 帧高度
+     */
+    uint16_t GetFrameHeight() const { return frame_.height; }
 };
 
 #endif // ndef CONFIG_IDF_TARGET_ESP32

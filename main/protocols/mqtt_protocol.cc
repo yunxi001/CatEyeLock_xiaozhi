@@ -178,6 +178,42 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     return udp_->Send(encrypted) > 0;
 }
 
+bool MqttProtocol::SendVideo(const uint8_t* data, size_t size, uint32_t timestamp, 
+                              uint16_t width, uint16_t height) {
+    // MQTT protocol uses UDP for audio, but video should use MQTT publish
+    // due to larger packet size
+    if (publish_topic_.empty()) {
+        ESP_LOGW(TAG, "Cannot send video: publish topic not set");
+        return false;
+    }
+
+    // Create BinaryProtocol2 format message
+    std::string serialized;
+    serialized.resize(sizeof(BinaryProtocol2) + size);
+    auto bp2 = (BinaryProtocol2*)serialized.data();
+    bp2->version = htons(2);
+    bp2->type = 0;  // Type remains 0 (same as audio)
+    // Video: use reserved field to encode width and height
+    // High 16 bits: width, Low 16 bits: height
+    bp2->reserved = htonl(((uint32_t)width << 16) | (uint32_t)height);
+    bp2->timestamp = htonl(timestamp);
+    bp2->payload_size = htonl(size);
+    memcpy(bp2->payload, data, size);
+
+    // Publish as binary data to a video-specific topic
+    std::string video_topic = publish_topic_ + "/video";
+    
+    ESP_LOGD(TAG, "Sending video frame via MQTT: %dx%d, size=%zu, timestamp=%u", 
+             width, height, size, timestamp);
+    
+    if (!mqtt_->Publish(video_topic, serialized, false)) {
+        ESP_LOGW(TAG, "Failed to publish video frame");
+        return false;
+    }
+    
+    return true;
+}
+
 void MqttProtocol::CloseAudioChannel() {
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);

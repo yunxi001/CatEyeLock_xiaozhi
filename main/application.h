@@ -30,6 +30,7 @@
 #include "ota.h"                // OTA (Over-the-Air) 更新模块
 #include "audio_service.h"      // 音频服务模块
 #include "device_state_event.h" // 设备状态和事件定义
+#include "monitor_service.h"    // 监控服务模块
 
 // ======================= 主事件循环事件位定义 =======================
 // 使用 FreeRTOS 事件组的位（bit）来触发不同的事件处理
@@ -111,6 +112,12 @@ public:
     void PlaySound(const std::string_view& sound);
     /** @brief 获取音频服务对象的引用。 */
     AudioService& GetAudioService() { return audio_service_; }
+    /** @brief 启动监控模式。 */
+    bool StartMonitorMode();
+    /** @brief 停止监控模式。 */
+    void StopMonitorMode();
+    /** @brief 检查是否处于监控模式。 */
+    bool IsMonitorMode() const;
 
 private:
     /** @brief 私有构造函数，用于单例模式。 */
@@ -128,6 +135,7 @@ private:
     AecMode aec_mode_ = kAecOff;                        // AEC 模式
     std::string last_error_message_;                    // 最后一次的错误信息
     AudioService audio_service_;                        // 音频服务对象
+    std::unique_ptr<MonitorService> monitor_service_;   // 监控服务对象
 
     bool has_server_time_ = false;                      // 是否已从服务器获取时间
     bool aborted_ = false;                              // 是否已中止 TTS 播放

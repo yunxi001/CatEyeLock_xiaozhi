@@ -1040,3 +1040,56 @@ std::string Esp32Camera::Explain(const std::string& question) {
              (int)frame_.len, (int)total_sent, (int)remain_stack_size, question.c_str(), result.c_str());
     return result;
 }
+
+bool Esp32Camera::CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int quality) {
+    if (!streaming_on_ || video_fd_ < 0 || !frame_.data) {
+        ESP_LOGE(TAG, "Camera not ready for JPEG capture");
+        return false;
+    }
+
+    if (jpeg_data == nullptr || jpeg_size == nullptr) {
+        ESP_LOGE(TAG, "Invalid output parameters");
+        return false;
+    }
+
+    // 使用临时缓冲区收集JPEG数据
+    std::vector<uint8_t> jpeg_buffer;
+    jpeg_buffer.reserve(frame_.len / 2);  // 预估压缩后大小
+
+    uint16_t w = frame_.width ? frame_.width : 320;
+    uint16_t h = frame_.height ? frame_.height : 240;
+    v4l2_pix_fmt_t enc_fmt = frame_.format;
+
+    bool ok = image_to_jpeg_cb(
+        frame_.data, frame_.len, w, h, enc_fmt, quality,
+        [](void* arg, size_t index, const void* data, size_t len) -> size_t {
+            auto buffer = static_cast<std::vector<uint8_t>*>(arg);
+            if (index == 0 && data != nullptr && len > 0) {
+                const uint8_t* bytes = static_cast<const uint8_t*>(data);
+                buffer->insert(buffer->end(), bytes, bytes + len);
+            }
+            return len;
+        },
+        &jpeg_buffer);
+
+    if (!ok || jpeg_buffer.empty()) {
+        ESP_LOGE(TAG, "Failed to encode JPEG");
+        return false;
+    }
+
+    // 分配PSRAM内存并复制数据
+    *jpeg_size = jpeg_buffer.size();
+    *jpeg_data = (uint8_t*)heap_caps_malloc(*jpeg_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (*jpeg_data == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG data", *jpeg_size);
+        return false;
+    }
+
+    memcpy(*jpeg_data, jpeg_buffer.data(), *jpeg_size);
+    ESP_LOGI(TAG, "Captured JPEG: %dx%d, size=%zu bytes, quality=%d", w, h, *jpeg_size, quality);
+    return true;
+}
+
+bool Esp32Camera::IsAvailable() const {
+    return streaming_on_ && video_fd_ >= 0;
+}
