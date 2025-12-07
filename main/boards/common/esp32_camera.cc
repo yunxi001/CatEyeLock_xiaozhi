@@ -23,12 +23,14 @@
 #include "mcp_server.h"
 #include "system_info.h"
 
+// 根据配置启用调试模式，调整日志级别
 #ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
 #undef LOG_LOCAL_LEVEL
 #define LOG_LOCAL_LEVEL MAX(CONFIG_LOG_DEFAULT_LEVEL, ESP_LOG_DEBUG)
 #endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
-#include <esp_log.h> // should be after LOCAL_LOG_LEVEL definition
+#include <esp_log.h> // 应该在LOCAL_LOG_LEVEL定义之后包含
 
+// 根据配置启用图像旋转功能
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
 #ifdef CONFIG_IDF_TARGET_ESP32P4
 #include "driver/ppa.h"
@@ -54,11 +56,13 @@
 
 #define TAG "Esp32Camera"
 
+// 警告像素顺序交换可能导致YUV422格式图像损坏
 #if defined(CONFIG_CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER) || defined(CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP)
 #warning \
     "CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER or CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is enabled, which may cause image corruption in YUV422 format!"
 #endif
 
+// 调试模式下的辅助宏和函数
 #if CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
 #define CAM_PRINT_FOURCC(pixelformat)       \
     char fourcc[5];                         \
@@ -69,16 +73,18 @@
     fourcc[4] = '\0';                       \
     ESP_LOGD(TAG, "FOURCC: '%c%c%c%c'", fourcc[0], fourcc[1], fourcc[2], fourcc[3]);
 
-// for compatibility with old esp_video version
+// 为了与旧版esp_video兼容
 #ifndef MAP_FAILED
 #define MAP_FAILED nullptr
 #endif
 
+// 弱符号声明esp_video_deinit函数，如果未实现则返回ESP_ERR_NOT_SUPPORTED
 __attribute__((weak)) esp_err_t esp_video_deinit(void) {
     return ESP_ERR_NOT_SUPPORTED;
 }
-// end of for compatibility with old esp_video version
+// 兼容旧版esp_video结束
 
+// 日志记录可用的视频设备
 static void log_available_video_devices() {
     for (int i = 0; i < 50; i++) {
         char path[16];
@@ -94,7 +100,9 @@ static void log_available_video_devices() {
 #define CAM_PRINT_FOURCC(pixelformat) (void)0;
 #endif  // CONFIG_XIAOZHI_ENABLE_CAMERA_DEBUG_MODE
 
+// Esp32Camera构造函数，初始化摄像头硬件和相关配置
 Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
+    // 初始化视频子系统
     if (esp_video_init(&config) != ESP_OK) {
         ESP_LOGE(TAG, "esp_video_init failed");
         return;
@@ -106,6 +114,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
 
     const char* video_device_name = nullptr;
 
+    // 根据配置确定使用的视频设备类型
     if (false) { /* 用于构建 else if */
     }
 #if CONFIG_ESP_VIDEO_ENABLE_MIPI_CSI_VIDEO_DEVICE
@@ -134,11 +143,13 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
     }
 #endif
 
+    // 检查是否有启用的视频设备
     if (video_device_name == nullptr) {
         ESP_LOGE(TAG, "no video device is enabled");
         return;
     }
 
+    // 打开视频设备文件描述符
     video_fd_ = open(video_device_name, O_RDWR);
 
     if (video_fd_ < 0) {
@@ -149,6 +160,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
         return;
     }
 
+    // 查询设备能力
     struct v4l2_capability cap = {};
     if (ioctl(video_fd_, VIDIOC_QUERYCAP, &cap) != 0) {
         ESP_LOGE(TAG, "VIDIOC_QUERYCAP failed, errno=%d(%s)", errno, strerror(errno));
@@ -162,6 +174,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
         "VIDIOC_QUERYCAP: driver=%s, card=%s, bus_info=%s, version=0x%08lx, capabilities=0x%08lx, device_caps=0x%08lx",
         cap.driver, cap.card, cap.bus_info, cap.version, cap.capabilities, cap.device_caps);
 
+    // 获取当前格式设置
     struct v4l2_format format = {};
     format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_G_FMT, &format) != 0) {
@@ -174,6 +187,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
              format.fmt.pix.width, format.fmt.pix.height);
     CAM_PRINT_FOURCC(format.fmt.pix.pixelformat);
 
+    // 设置格式参数
     struct v4l2_format setformat = {};
     setformat.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 #ifdef CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
@@ -183,6 +197,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
     setformat.fmt.pix.width = format.fmt.pix.width;
     setformat.fmt.pix.height = format.fmt.pix.height;
 
+    // 查找最佳像素格式
     struct v4l2_fmtdesc fmtdesc = {};
     fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmtdesc.index = 0;
@@ -231,6 +246,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
         }
     };
 #endif
+    // 遍历所有支持的格式，找到最优格式
     while (ioctl(video_fd_, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
         ESP_LOGD(TAG, "VIDIOC_ENUM_FMT: pixelformat=0x%08lx, description=%s", fmtdesc.pixelformat, fmtdesc.description);
         CAM_PRINT_FOURCC(fmtdesc.pixelformat);
@@ -246,6 +262,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
         sensor_format_ = best_fmt;
     }
 
+    // 检查是否找到支持的像素格式
     if (!setformat.fmt.pix.pixelformat) {
         ESP_LOGE(TAG, "no supported pixel format found");
         close(video_fd_);
@@ -256,6 +273,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
 
     ESP_LOGD(TAG, "selected pixel format: 0x%08lx", setformat.fmt.pix.pixelformat);
 
+    // 设置选定的像素格式
     if (ioctl(video_fd_, VIDIOC_S_FMT, &setformat) != 0) {
         ESP_LOGE(TAG, "VIDIOC_S_FMT failed, errno=%d(%s)", errno, strerror(errno));
         close(video_fd_);
@@ -272,7 +290,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
     frame_.height = setformat.fmt.pix.height;
 #endif
 
-    // 申请缓冲并mmap
+    // 申请缓冲并mmap映射
     struct v4l2_requestbuffers req = {};
     req.count = strcmp(video_device_name, ESP_VIDEO_MIPI_CSI_DEVICE_NAME) == 0 ? 2 : 1;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -317,6 +335,7 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
         }
     }
 
+    // 启动视频流
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(video_fd_, VIDIOC_STREAMON, &type) != 0) {
         ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
@@ -360,16 +379,20 @@ Esp32Camera::Esp32Camera(const esp_video_init_config_t& config) {
 #endif  // CONFIG_ESP_VIDEO_ENABLE_ISP_VIDEO_DEVICE
 }
 
+// Esp32Camera析构函数，释放资源
 Esp32Camera::~Esp32Camera() {
+    // 关闭视频流
     if (streaming_on_ && video_fd_ >= 0) {
         int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         ioctl(video_fd_, VIDIOC_STREAMOFF, &type);
     }
+    // 取消内存映射
     for (auto& b : mmap_buffers_) {
         if (b.start && b.length) {
             munmap(b.start, b.length);
         }
     }
+    // 关闭文件描述符
     if (video_fd_ >= 0) {
         close(video_fd_);
         video_fd_ = -1;
@@ -378,20 +401,25 @@ Esp32Camera::~Esp32Camera() {
     esp_video_deinit();
 }
 
+// 设置图像解释服务的URL和令牌
 void Esp32Camera::SetExplainUrl(const std::string& url, const std::string& token) {
     explain_url_ = url;
     explain_token_ = token;
 }
 
+// 捕获一帧图像
 bool Esp32Camera::Capture() {
+    // 等待之前的编码线程完成
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
 
+    // 检查摄像头是否可用
     if (!streaming_on_ || video_fd_ < 0) {
         return false;
     }
 
+    // 连续取出3帧图像，只保留最后一帧
     for (int i = 0; i < 3; i++) {
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -427,6 +455,7 @@ bool Esp32Camera::Capture() {
             ESP_LOG_BUFFER_HEXDUMP(TAG, mmap_buffers_[buf.index].start, MIN(mmap_buffers_[buf.index].length, 256),
                                    ESP_LOG_DEBUG);
 
+            // 根据传感器格式处理图像数据
             switch (sensor_format_) {
                 case V4L2_PIX_FMT_RGB565:
                 case V4L2_PIX_FMT_RGB24:
@@ -722,6 +751,7 @@ bool Esp32Camera::Capture() {
 #endif  // CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE
         }
 
+        // 将缓冲区重新放入队列
         if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
             ESP_LOGE(TAG, "VIDIOC_QBUF failed");
         }
@@ -741,6 +771,7 @@ bool Esp32Camera::Capture() {
         lv_color_format_t color_format = LV_COLOR_FORMAT_RGB565;
         uint8_t* data = nullptr;
 
+        // 根据帧格式处理显示图像
         switch (frame_.format) {
             // LVGL 显示 YUV 系的图像似乎都有问题，暂时转换为 RGB565 显示
             case V4L2_PIX_FMT_YUYV:
@@ -832,12 +863,14 @@ bool Esp32Camera::Capture() {
                 return false;
         }
 
+        // 创建LVGL图像并显示
         auto image = std::make_unique<LvglAllocatedImage>(data, lvgl_image_size, w, h, stride, color_format);
         display->SetPreviewImage(std::move(image));
     }
     return true;
 }
 
+// 设置水平镜像
 bool Esp32Camera::SetHMirror(bool enabled) {
     if (video_fd_ < 0)
         return false;
@@ -855,6 +888,7 @@ bool Esp32Camera::SetHMirror(bool enabled) {
     return true;
 }
 
+// 设置垂直翻转
 bool Esp32Camera::SetVFlip(bool enabled) {
     if (video_fd_ < 0)
         return false;
@@ -896,6 +930,7 @@ bool Esp32Camera::SetVFlip(bool enabled) {
  * @warning 如果摄像头缓冲区为空或网络连接失败，将返回错误信息
  */
 std::string Esp32Camera::Explain(const std::string& question) {
+    // 检查解释URL是否已设置
     if (explain_url_.empty()) {
         throw std::runtime_error("Image explain URL or token is not set");
     }
@@ -909,16 +944,19 @@ std::string Esp32Camera::Explain(const std::string& question) {
 
     // 我们使用优化编码器（耗时约500毫秒和8KB SRAM）来编码图像为JPEG，并为此创建一个线程。
 
+    // 启动JPEG编码线程
     encoder_thread_ = std::thread([this, jpeg_queue]() {
         uint16_t w = frame_.width ? frame_.width : 320;
         uint16_t h = frame_.height ? frame_.height : 240;
         v4l2_pix_fmt_t enc_fmt = frame_.format;
+        // 使用回调方式编码JPEG图像
         bool ok = image_to_jpeg_cb(
             frame_.data, frame_.len, w, h, enc_fmt, 80,
             [](void* arg, size_t index, const void* data, size_t len) -> size_t {
                 auto jpeg_queue = static_cast<QueueHandle_t>(arg);
                 JpegChunk chunk = {.data = nullptr, .len = len};
                 if (index == 0 && data != nullptr && len > 0) {
+                    // 为JPEG数据块分配内存
                     chunk.data = (uint8_t*)heap_caps_aligned_alloc(16, len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                     if (chunk.data == nullptr) {
                         ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
@@ -929,17 +967,20 @@ std::string Esp32Camera::Explain(const std::string& question) {
                 } else {
                     chunk.len = 0;  // Sentinel or error
                 }
+                // 将数据块发送到队列
                 xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
                 return len;
             },
             jpeg_queue);
 
+        // 如果编码失败，发送终止标记
         if (!ok) {
             JpegChunk chunk = {.data = nullptr, .len = 0};
             xQueueSend(jpeg_queue, &chunk, portMAX_DELAY);
         }
     });
 
+    // 创建HTTP客户端
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(3);
     // 构造multipart/form-data请求体
@@ -953,9 +994,10 @@ std::string Esp32Camera::Explain(const std::string& question) {
     }
     http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
     http->SetHeader("Transfer-Encoding", "chunked");
+    // 打开HTTP连接
     if (!http->Open("POST", explain_url_)) {
         ESP_LOGE(TAG, "Failed to connect to explain URL");
-        // Clear the queue
+        // 清理资源
         encoder_thread_.join();
         JpegChunk chunk;
         while (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) == pdPASS) {
@@ -991,6 +1033,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
     // 第三块：JPEG数据
     size_t total_sent = 0;
     bool saw_terminator = false;
+    // 从队列接收JPEG数据块并发送
     while (true) {
         JpegChunk chunk;
         if (xQueueReceive(jpeg_queue, &chunk, portMAX_DELAY) != pdPASS) {
@@ -1011,6 +1054,7 @@ std::string Esp32Camera::Explain(const std::string& question) {
     // 清理队列
     vQueueDelete(jpeg_queue);
 
+    // 检查JPEG编码是否成功
     if (!saw_terminator || total_sent == 0) {
         ESP_LOGE(TAG, "JPEG encoder failed or produced empty output");
         throw std::runtime_error("Failed to encode image to JPEG");
@@ -1025,15 +1069,17 @@ std::string Esp32Camera::Explain(const std::string& question) {
     // 结束块
     http->Write("", 0);
 
+    // 检查HTTP响应状态
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());
         throw std::runtime_error("Failed to upload photo");
     }
 
+    // 读取服务器响应
     std::string result = http->ReadAll();
     http->Close();
 
-    // 获取剩余任务栈大小
+    // 获取剩余任务栈大小，用于调试
 
     size_t remain_stack_size = uxTaskGetStackHighWaterMark(nullptr);
     ESP_LOGI(TAG, "Explain image size=%d bytes, compressed size=%d, remain stack size=%d, question=%s\n%s",
@@ -1041,12 +1087,121 @@ std::string Esp32Camera::Explain(const std::string& question) {
     return result;
 }
 
+// 高效捕获一帧图像用于视频流（监控模式专用）
+bool Esp32Camera::CaptureForStream() {
+    // 等待之前的编码线程完成
+    if (encoder_thread_.joinable()) {
+        encoder_thread_.join();
+    }
+
+    // 检查摄像头是否可用
+    if (!streaming_on_ || video_fd_ < 0) {
+        return false;
+    }
+
+    // 只取出一帧图像（不像 Capture() 那样取3帧丢2帧）
+    struct v4l2_buffer buf = {};
+    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_DQBUF failed");
+        return false;
+    }
+
+    // 保存帧副本到PSRAM
+    if (frame_.data) {
+        heap_caps_free(frame_.data);
+        frame_.data = nullptr;
+        frame_.format = 0;
+    }
+    frame_.len = buf.bytesused;
+    frame_.data = (uint8_t*)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!frame_.data) {
+        ESP_LOGE(TAG, "alloc frame copy failed: need allocate %d bytes", buf.bytesused);
+        if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+            ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
+        }
+        return false;
+    }
+
+    // 根据传感器格式处理图像数据
+    switch (sensor_format_) {
+        case V4L2_PIX_FMT_RGB565:
+        case V4L2_PIX_FMT_RGB24:
+        case V4L2_PIX_FMT_YUYV:
+        case V4L2_PIX_FMT_YUV420:
+        case V4L2_PIX_FMT_GREY:
+#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
+        case V4L2_PIX_FMT_JPEG:
+#endif
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
+        {
+            auto src16 = (uint16_t*)mmap_buffers_[buf.index].start;
+            auto dst16 = (uint16_t*)frame_.data;
+            size_t count = (size_t)mmap_buffers_[buf.index].length / 2;
+            for (size_t i = 0; i < count; i++) {
+                dst16[i] = __builtin_bswap16(src16[i]);
+            }
+        }
+#else
+            memcpy(frame_.data, mmap_buffers_[buf.index].start,
+                   MIN(mmap_buffers_[buf.index].length, frame_.len));
+#endif
+            frame_.format = sensor_format_;
+            break;
+        case V4L2_PIX_FMT_YUV422P: {
+            frame_.format = V4L2_PIX_FMT_YUYV;
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
+            {
+                auto src16 = (uint16_t*)mmap_buffers_[buf.index].start;
+                auto dst16 = (uint16_t*)frame_.data;
+                size_t count = (size_t)mmap_buffers_[buf.index].length / 2;
+                for (size_t i = 0; i < count; i++) {
+                    dst16[i] = __builtin_bswap16(src16[i]);
+                }
+            }
+#else
+            memcpy(frame_.data, mmap_buffers_[buf.index].start,
+                   MIN(mmap_buffers_[buf.index].length, frame_.len));
+#endif
+            break;
+        }
+        case V4L2_PIX_FMT_RGB565X: {
+            auto src16 = (uint16_t*)mmap_buffers_[buf.index].start;
+            auto dst16 = (uint16_t*)frame_.data;
+            size_t pixel_count = (size_t)frame_.width * (size_t)frame_.height;
+            for (size_t i = 0; i < pixel_count; i++) {
+                dst16[i] = __builtin_bswap16(src16[i]);
+            }
+            frame_.format = V4L2_PIX_FMT_RGB565;
+            break;
+        }
+        default:
+            ESP_LOGE(TAG, "unsupported sensor format: 0x%08x", sensor_format_);
+            if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+                ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
+            }
+            return false;
+    }
+
+    // 将缓冲区重新放入队列
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "VIDIOC_QBUF failed");
+    }
+
+    // 注意：不显示预览图片，直接返回
+    return true;
+}
+
+// 捕获JPEG图像
 bool Esp32Camera::CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int quality) {
+    // 检查摄像头是否准备就绪
     if (!streaming_on_ || video_fd_ < 0 || !frame_.data) {
         ESP_LOGE(TAG, "Camera not ready for JPEG capture");
         return false;
     }
 
+    // 检查输出参数是否有效
     if (jpeg_data == nullptr || jpeg_size == nullptr) {
         ESP_LOGE(TAG, "Invalid output parameters");
         return false;
@@ -1060,6 +1215,7 @@ bool Esp32Camera::CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int qualit
     uint16_t h = frame_.height ? frame_.height : 240;
     v4l2_pix_fmt_t enc_fmt = frame_.format;
 
+    // 编码JPEG图像
     bool ok = image_to_jpeg_cb(
         frame_.data, frame_.len, w, h, enc_fmt, quality,
         [](void* arg, size_t index, const void* data, size_t len) -> size_t {
@@ -1072,6 +1228,7 @@ bool Esp32Camera::CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int qualit
         },
         &jpeg_buffer);
 
+    // 检查编码是否成功
     if (!ok || jpeg_buffer.empty()) {
         ESP_LOGE(TAG, "Failed to encode JPEG");
         return false;
@@ -1086,10 +1243,11 @@ bool Esp32Camera::CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int qualit
     }
 
     memcpy(*jpeg_data, jpeg_buffer.data(), *jpeg_size);
-    ESP_LOGI(TAG, "Captured JPEG: %dx%d, size=%zu bytes, quality=%d", w, h, *jpeg_size, quality);
+    // ESP_LOGI(TAG, "Captured JPEG: %dx%d, size=%zu bytes, quality=%d", w, h, *jpeg_size, quality);
     return true;
 }
 
+// 检查摄像头是否可用
 bool Esp32Camera::IsAvailable() const {
     return streaming_on_ && video_fd_ >= 0;
 }

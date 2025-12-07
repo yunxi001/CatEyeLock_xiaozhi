@@ -137,6 +137,16 @@ public:
     bool CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int quality = 80);
 
     /**
+     * @brief 高效捕获一帧图像用于视频流（监控模式专用）
+     * @details 与 Capture() 不同，此函数：
+     *          - 只捕获一帧（不丢弃前两帧）
+     *          - 不在屏幕上显示预览
+     *          - 专为高帧率视频流优化
+     * @return bool 如果捕获成功返回true
+     */
+    bool CaptureForStream();
+
+    /**
      * @brief 检查摄像头是否已初始化并可用
      * @return bool 如果摄像头可用返回true
      */

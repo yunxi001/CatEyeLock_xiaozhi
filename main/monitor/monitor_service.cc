@@ -34,10 +34,14 @@ bool MonitorService::Start(Protocol* protocol, Camera* camera, AudioService* aud
     camera_ = camera;
     audio_service_ = audio_service;
 
+    // Enable monitor mode in protocol (force BinaryProtocol2 format)
+    protocol_->SetMonitorMode(true);
+
     // 创建视频流服务
     video_stream_ = std::make_unique<VideoStreamService>();
     if (!video_stream_->Start(camera_, kDefaultFps)) {
         ESP_LOGE(TAG, "Failed to start video stream service");
+        protocol_->SetMonitorMode(false);
         return false;
     }
 
@@ -76,6 +80,11 @@ void MonitorService::Stop() {
     }
 
     running_ = false;
+
+    // Disable monitor mode in protocol
+    if (protocol_) {
+        protocol_->SetMonitorMode(false);
+    }
 
     // 停止视频流
     if (video_stream_) {

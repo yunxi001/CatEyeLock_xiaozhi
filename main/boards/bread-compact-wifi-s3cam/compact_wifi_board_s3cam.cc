@@ -166,46 +166,55 @@ private:
      */
     void InitializeCamera() {
         // 1. 配置摄像头 DVP 接口的引脚
+        // DVP (Digital Video Port) 是摄像头与 ESP32 之间的并行数据接口
         static esp_cam_ctlr_dvp_pin_config_t dvp_pin_config = {
-            .data_width = CAM_CTLR_DATA_WIDTH_8, // 8位数据宽度
+            .data_width = CAM_CTLR_DATA_WIDTH_8, // 设置数据总线宽度为8位
             .data_io = {
+                // 配置8位数据线引脚映射
                 [0] = CAMERA_PIN_D0, [1] = CAMERA_PIN_D1, [2] = CAMERA_PIN_D2, [3] = CAMERA_PIN_D3,
                 [4] = CAMERA_PIN_D4, [5] = CAMERA_PIN_D5, [6] = CAMERA_PIN_D6, [7] = CAMERA_PIN_D7,
             },
-            .vsync_io = CAMERA_PIN_VSYNC,
-            .de_io = CAMERA_PIN_HREF,
-            .pclk_io = CAMERA_PIN_PCLK,
-            .xclk_io = CAMERA_PIN_XCLK,
+            .vsync_io = CAMERA_PIN_VSYNC,  // 垂直同步信号引脚
+            .de_io = CAMERA_PIN_HREF,      // 数据有效信号引脚(HREF)
+            .pclk_io = CAMERA_PIN_PCLK,    // 像素时钟信号引脚
+            .xclk_io = CAMERA_PIN_XCLK,    // 外部时钟输出引脚(用于驱动摄像头时钟)
         };
 
         // 2. 配置摄像头 SCCB (I2C) 接口
+        // SCCB (Serial Camera Control Bus) 是用于配置摄像头寄存器的串行接口，基于I2C协议
         esp_video_init_sccb_config_t sccb_config = {
-            .init_sccb = true,
+            .init_sccb = true,             // 启用SCCB接口初始化
             .i2c_config = {
-                .port = 0,
-                .scl_pin = CAMERA_PIN_SIOC,
-                .sda_pin = CAMERA_PIN_SIOD,
+                .port = 0,                 // 使用I2C端口0
+                .scl_pin = CAMERA_PIN_SIOC, // I2C时钟线引脚
+                .sda_pin = CAMERA_PIN_SIOD, // I2C数据线引脚
             },
-            .freq = 100000, // I2C 时钟频率
+            .freq = 100000, // I2C 时钟频率设置为100kHz(标准模式)
         };
 
         // 3. 组合 DVP 和 SCCB 配置
+        // 将DVP接口和SCCB接口配置整合到摄像头控制器配置中
         esp_video_init_dvp_config_t dvp_config = {
-            .sccb_config = sccb_config,
-            .reset_pin = CAMERA_PIN_RESET,
-            .pwdn_pin = CAMERA_PIN_PWDN,
-            .dvp_pin = dvp_pin_config,
-            .xclk_freq = XCLK_FREQ_HZ,
+            .sccb_config = sccb_config,    // 包含上面定义的SCCB配置
+            .reset_pin = CAMERA_PIN_RESET, // 摄像头复位引脚
+            .pwdn_pin = CAMERA_PIN_PWDN,   // 摄像头电源关闭引脚
+            .dvp_pin = dvp_pin_config,     // 包含上面定义的DVP引脚配置
+            .xclk_freq = XCLK_FREQ_HZ,     // 外部时钟频率
         };
 
         // 4. 创建视频初始化总配置
+        // 构建完整的摄像头初始化配置结构体
         esp_video_init_config_t video_config = {
-            .dvp = &dvp_config,
+            .dvp = &dvp_config,            // 指向DVP配置的指针
         };
 
         // 5. 创建 Esp32Camera 实例
+        // 使用上述配置创建摄像头对象实例
         camera_ = new Esp32Camera(video_config);
-        camera_->SetHMirror(false); // 设置水平不镜像
+        
+        // 设置摄像头水平不镜像
+        // false表示图像不会左右翻转
+        camera_->SetHMirror(false); 
     }
 
     /**

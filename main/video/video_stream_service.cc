@@ -113,8 +113,8 @@ void VideoStreamService::CaptureLoop() {
             continue;
         }
 
-        // 先捕获一帧到内部缓冲区
-        if (!camera_->Capture()) {
+        // 使用高效捕获函数（只取一帧，不显示预览）
+        if (!esp32_camera->CaptureForStream()) {
             ESP_LOGW(TAG, "Failed to capture frame");
             vTaskDelay(frame_delay);
             continue;

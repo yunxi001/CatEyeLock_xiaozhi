@@ -446,7 +446,8 @@ void Application::Start() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (device_state_ == kDeviceStateSpeaking) {
+        // 在 Speaking 状态或监控模式下播放音频
+        if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateMonitorStreaming) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });

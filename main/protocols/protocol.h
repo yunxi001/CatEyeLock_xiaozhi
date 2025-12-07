@@ -79,6 +79,10 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    
+    // Monitor mode control
+    virtual void SetMonitorMode(bool enabled) { monitor_mode_ = enabled; }
+    virtual bool IsMonitorMode() const { return monitor_mode_; }
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;
@@ -92,6 +96,7 @@ protected:
     int server_sample_rate_ = 24000;
     int server_frame_duration_ = 60;
     bool error_occurred_ = false;
+    bool monitor_mode_ = false;  // Monitor mode flag for video streaming
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 

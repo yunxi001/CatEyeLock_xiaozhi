@@ -26,7 +26,7 @@ public:
 private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
-    int version_ = 1;
+    int version_ = 1;  // Use version 2 by default for AEC and video support
 
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;

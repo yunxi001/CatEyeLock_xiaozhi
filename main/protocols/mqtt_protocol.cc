@@ -180,6 +180,12 @@ bool MqttProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
 
 bool MqttProtocol::SendVideo(const uint8_t* data, size_t size, uint32_t timestamp, 
                               uint16_t width, uint16_t height) {
+    // Video only works in monitor mode
+    if (!monitor_mode_) {
+        ESP_LOGW(TAG, "Cannot send video: not in monitor mode");
+        return false;
+    }
+
     // MQTT protocol uses UDP for audio, but video should use MQTT publish
     // due to larger packet size
     if (publish_topic_.empty()) {
@@ -192,7 +198,7 @@ bool MqttProtocol::SendVideo(const uint8_t* data, size_t size, uint32_t timestam
     serialized.resize(sizeof(BinaryProtocol2) + size);
     auto bp2 = (BinaryProtocol2*)serialized.data();
     bp2->version = htons(2);
-    bp2->type = 0;  // Type remains 0 (same as audio)
+    bp2->type = 0;
     // Video: use reserved field to encode width and height
     // High 16 bits: width, Low 16 bits: height
     bp2->reserved = htonl(((uint32_t)width << 16) | (uint32_t)height);
