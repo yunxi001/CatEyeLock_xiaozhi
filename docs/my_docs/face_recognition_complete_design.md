@@ -83,21 +83,21 @@ Server → Protocol → AudioService → 播放 TTS 语音
 
 ### 1. ESP32 ↔ STM32 串口协议
 
-#### 协议格式（9字节固定长度）
+#### 协议格式（7字节固定长度）
 
 ```
-+--------+--------+--------+--------+--------+--------+--------+--------+--------+
-| HEADER | CAT    | TYPE   | DATA0  | DATA1  | DATA2  | DATA3  | DATA4  | CHKSUM |
-| 0xAA   | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte |
-+--------+--------+--------+--------+--------+--------+--------+--------+--------+
++--------+--------+--------+--------+--------+--------+--------+
+| HEADER | CAT    | TYPE   | DATA0  | DATA1  | DATA2  | CHKSUM |
+| 0xAA   | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte | 1 byte |
++--------+--------+--------+--------+--------+--------+--------+
 ```
 
 **字段说明：**
 - `HEADER`: 固定 0xAA，帧起始标识
 - `CAT`: 消息分类（Category）
 - `TYPE`: 消息类型（在分类内唯一）
-- `DATA0-4`: 5字节数据字段
-- `CHKSUM`: 校验和 = (CAT + TYPE + DATA0 + DATA1 + DATA2 + DATA3 + DATA4) & 0xFF
+- `DATA0-2`: 3字节数据字段
+- `CHKSUM`: 校验和 = (CAT + TYPE + DATA0 + DATA1 + DATA2) & 0xFF
 
 #### 消息分类（CAT）
 
@@ -128,35 +128,52 @@ Server → Protocol → AudioService → 播放 TTS 语音
 | TYPE | 名称 | DATA 字段 | 说明 |
 |------|------|-----------|------|
 | 0x01 | UNLOCK | - | 开锁命令 |
-| 0x02 | ALARM_ON | [level, 0, 0, 0, 0] | 开启警报 |
+| 0x02 | ALARM_ON | [level, 0, 0] | 开启警报 |
 | 0x03 | ALARM_OFF | - | 关闭警报 |
-| 0x04 | SET_TEMP_CODE | [d0, d1, d2, d3, d4] | 设置临时开锁码（6位数字） |
-| 0x05 | LED_CTRL | [mode, r, g, b, 0] | LED 控制 |
+| 0x04 | SET_TEMP_CODE | [d0, d1, d2] | 设置临时开锁码（6位数字） |
+| 0x05 | LED_CTRL | [mode, color, brightness] | LED 控制 |
 
-**6位密码编码方式：**
-- DATA0: 第1位数字 (0-9)
-- DATA1: 第2位数字 (0-9)
-- DATA2: 第3位数字 (0-9)
-- DATA3: 第4位数字 (0-9)
-- DATA4: 低4位=第5位，高4位=第6位
+**6位密码编码方式（3字节存储）：**
+- DATA0: 高4位=第1位数字，低4位=第2位数字
+- DATA1: 高4位=第3位数字，低4位=第4位数字
+- DATA2: 高4位=第5位数字，低4位=第6位数字
 
 示例：密码 "123456"
 ```
-DATA0 = 0x01, DATA1 = 0x02, DATA2 = 0x03, DATA3 = 0x04, DATA4 = 0x65
+DATA0 = 0x12  (高4位=1, 低4位=2)
+DATA1 = 0x34  (高4位=3, 低4位=4)
+DATA2 = 0x56  (高4位=5, 低4位=6)
 ```
 
 #### 通信示例
 
 **门铃按下事件：**
 ```
-STM32 → ESP32: AA 01 01 00 00 00 00 00 02
-ESP32 → STM32: AA 0F 00 01 01 00 00 00 11  (ACK)
+STM32 → ESP32: AA 01 01 00 00 00 02
+                │  │  │  └────┴─ DATA0-2 = 0
+                │  │  └─ TYPE = DOORBELL_PRESSED
+                │  └─ CAT = EVENT
+                └─ HEADER
+
+ESP32 → STM32: AA 0F 00 01 01 00 11  (ACK)
 ```
 
 **开锁命令：**
 ```
-ESP32 → STM32: AA 02 01 00 00 00 00 00 03
-STM32 → ESP32: AA 0F 00 02 01 00 00 00 12  (ACK)
+ESP32 → STM32: AA 02 01 00 00 00 03
+STM32 → ESP32: AA 0F 00 02 01 00 12  (ACK)
+```
+
+**设置临时开锁码 "123456"：**
+```
+ESP32 → STM32: AA 02 04 12 34 56 A2
+                │  │  │  │  │  │  └─ CHKSUM
+                │  │  │  │  │  └─ DATA2 = 0x56 (5,6)
+                │  │  │  │  └─ DATA1 = 0x34 (3,4)
+                │  │  │  └─ DATA0 = 0x12 (1,2)
+                │  │  └─ TYPE = SET_TEMP_CODE
+                │  └─ CAT = CONTROL
+                └─ HEADER
 ```
 
 ---
@@ -197,7 +214,9 @@ jpeg_data = data[16:16+payload_size]
 
 #### 人脸识别响应（服务器 → ESP32）
 
-**场景1：成功识别 + 有权限**
+**重要：** 服务器会发送多个独立的 JSON 消息，不是一个包含所有信息的 JSON。
+
+**消息1：人脸识别结果**
 ```json
 {
   "type": "face_recognition",
@@ -210,11 +229,50 @@ jpeg_data = data[16:16+payload_size]
   "access": {
     "granted": true,
     "action": "open_door"
-  },
-  "tts": {
-    "text": "您好，张三，欢迎回家！",
-    "audio_url": "https://server.com/tts/12345.mp3"
   }
+}
+```
+
+**消息2：TTS 开始**
+```json
+{
+  "type": "tts",
+  "state": "start"
+}
+```
+
+**消息3：TTS 文本（可选，用于显示）**
+```json
+{
+  "type": "tts",
+  "state": "sentence_start",
+  "text": "您好，张三，欢迎回家！"
+}
+```
+
+**消息4：TTS 音频流**
+- 通过 `OnIncomingAudio` 回调接收 OPUS 音频数据
+- ESP32 自动播放音频
+
+**消息5：TTS 结束**
+```json
+{
+  "type": "tts",
+  "state": "stop"
+}
+```
+
+---
+
+**不同场景的识别结果：**
+
+**场景1：成功识别 + 有权限**
+```json
+{
+  "type": "face_recognition",
+  "result": "known",
+  "person": {"id": 1, "name": "张三", "relation": "owner"},
+  "access": {"granted": true, "action": "open_door"}
 }
 ```
 
@@ -223,19 +281,8 @@ jpeg_data = data[16:16+payload_size]
 {
   "type": "face_recognition",
   "result": "known",
-  "person": {
-    "id": 2,
-    "name": "李四",
-    "relation": "visitor"
-  },
-  "access": {
-    "granted": false,
-    "reason": "不在允许时段"
-  },
-  "tts": {
-    "text": "抱歉，李四，不在允许时段。",
-    "audio_url": "https://server.com/tts/12346.mp3"
-  }
+  "person": {"id": 2, "name": "李四", "relation": "visitor"},
+  "access": {"granted": false, "reason": "不在允许时段"}
 }
 ```
 
@@ -244,13 +291,7 @@ jpeg_data = data[16:16+payload_size]
 {
   "type": "face_recognition",
   "result": "unknown",
-  "access": {
-    "granted": false
-  },
-  "tts": {
-    "text": "您好，请问您找谁？",
-    "audio_url": "https://server.com/tts/12347.mp3"
-  }
+  "access": {"granted": false}
 }
 ```
 
@@ -258,11 +299,7 @@ jpeg_data = data[16:16+payload_size]
 ```json
 {
   "type": "face_recognition",
-  "result": "no_face",
-  "tts": {
-    "text": "未检测到人脸，请靠近摄像头。",
-    "audio_url": "https://server.com/tts/12348.mp3"
-  }
+  "result": "no_face"
 }
 ```
 
@@ -299,7 +336,7 @@ public:
     // 构建消息
     static std::vector<uint8_t> BuildMessage(
         uint8_t cat, uint8_t type,
-        const std::array<uint8_t, 5>& data = {}
+        const std::array<uint8_t, 3>& data = {}
     );
     
     // 解析消息
@@ -311,9 +348,9 @@ public:
     // 构建 ACK
     static std::vector<uint8_t> BuildAck(uint8_t orig_cat, uint8_t orig_type, bool success);
     
-    // 编码/解码6位密码
-    static std::array<uint8_t, 5> EncodePassword(const char* password);
-    static std::string DecodePassword(const std::array<uint8_t, 5>& data);
+    // 编码/解码6位密码（3字节存储）
+    static std::array<uint8_t, 3> EncodePassword(const char* password);
+    static std::string DecodePassword(const std::array<uint8_t, 3>& data);
 };
 ```
 
@@ -349,7 +386,7 @@ private:
     TaskHandle_t rx_task_handle_ = nullptr;
     EventCallback event_callback_;
     
-    bool SendMessage(uint8_t cat, uint8_t type, const std::array<uint8_t, 5>& data);
+    bool SendMessage(uint8_t cat, uint8_t type, const std::array<uint8_t, 3>& data);
     static void RxTask(void* param);
     void RxLoop();
 };
@@ -370,6 +407,9 @@ private:
     
     // 处理人脸识别结果
     void HandleFaceRecognitionResult(cJSON* root);
+    
+    // 注意：TTS 音频会通过现有的 OnIncomingJson 和 OnIncomingAudio 回调自动处理
+    // 不需要额外的 TTS 处理函数
     
     // 处理其他事件
     void HandleTamperAlert(uint8_t level);

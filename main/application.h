@@ -31,6 +31,7 @@
 #include "audio_service.h"      // 音频服务模块
 #include "device_state_event.h" // 设备状态和事件定义
 #include "monitor_service.h"    // 监控服务模块
+#include "lock_control/lock_control.h" // 锁控服务模块
 
 // ======================= 主事件循环事件位定义 =======================
 // 使用 FreeRTOS 事件组的位（bit）来触发不同的事件处理
@@ -136,10 +137,12 @@ private:
     std::string last_error_message_;                    // 最后一次的错误信息
     AudioService audio_service_;                        // 音频服务对象
     std::unique_ptr<MonitorService> monitor_service_;   // 监控服务对象
+    xiaozhi::LockControlService* lock_control_;         // 锁控服务对象指针
 
     bool has_server_time_ = false;                      // 是否已从服务器获取时间
     bool aborted_ = false;                              // 是否已中止 TTS 播放
     int clock_ticks_ = 0;                               // 时钟节拍计数
+    bool face_recognition_in_progress_ = false;         // 人脸识别是否正在进行
     TaskHandle_t check_new_version_task_handle_ = nullptr; // 检查新版本任务的句柄
     TaskHandle_t main_event_loop_task_handle_ = nullptr;   // 主事件循环任务的句柄
 
@@ -149,6 +152,13 @@ private:
     void CheckAssetsVersion();                          // 检查资源文件版本
     void ShowActivationCode(const std::string& code, const std::string& message); // 显示激活码
     void SetListeningMode(ListeningMode mode);          // 设置聆听模式
+    
+    // 锁控相关方法
+    void HandleLockEvent(const xiaozhi::LockMessage& msg); // 处理锁控事件
+    void TriggerFaceRecognition();                      // 触发人脸识别
+    void HandleFaceRecognitionResult(cJSON* root);      // 处理人脸识别结果
+    void HandleTamperAlert(uint8_t level);              // 处理暴力破坏警报
+    void HandleDoorNotClosed();                         // 处理门未关严实
 };
 
 

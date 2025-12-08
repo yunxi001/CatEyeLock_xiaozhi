@@ -1,0 +1,22 @@
+{
+  "enabled": true,
+  "name": "源代码文档同步",
+  "description": "监听本仓库中所有源文件（*.cc, *.h, *.c等）的变化。当这些文件被修改或创建时，要求代理人在README文件或/docs文件夹中进行更新，记录修改的文件、修改位置、修改内容摘要以及修改的内容实现的功能。",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "main/**/*.cc",
+      "main/**/*.h",
+      "main/**/*.c",
+      "scripts/**/*.py",
+      "CMakeLists.txt"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "检测到源代码文件发生变化。请执行以下操作：\n\n1. 识别被修改或新增的文件路径\n2. 分析修改的大致内容（简要描述变更）\n3. 总结修改实现的功能\n\n然后在 docs/my_docs/CHANGELOG.md 的最后更新变更日志，记录：\n- 修改/新增的文件名\n- 修改或新增的具体位置（简述，如在某函数，某类的某个位置）\n- 修改时间\n- 变更内容简述\n- 实现的功能说明"
+  },
+  "workspaceFolderName": "xiaozhi-esp32",
+  "shortName": "source-file-tracker"
+}

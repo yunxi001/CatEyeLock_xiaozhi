@@ -26,6 +26,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "lock_control/lock_control.h"
 
 #include <wifi_station.h>
 #include <esp_log.h>
@@ -88,6 +89,7 @@ private:
     Button boot_button_;      // GPIO0 上的启动/功能按钮
     LcdDisplay* display_;     // LCD 显示屏对象指针
     Esp32Camera* camera_;     // 摄像头对象指针
+    xiaozhi::LockControlService* lock_control_; // 锁控服务对象指针
 
     /**
      * @brief 初始化用于 LCD 的 SPI 总线。
@@ -233,17 +235,31 @@ private:
         });
     }
 
+    /**
+     * @brief 初始化锁控服务。
+     */
+    void InitializeLockControl() {
+        lock_control_ = new xiaozhi::LockControlService();
+        bool success = lock_control_->Start(LOCK_UART_PORT, LOCK_UART_TX_PIN, LOCK_UART_RX_PIN);
+        if (!success) {
+            ESP_LOGE(TAG, "Failed to start lock control service");
+        } else {
+            ESP_LOGI(TAG, "Lock control service started successfully");
+        }
+    }
+
 public:
     /**
      * @brief CompactWifiBoardS3Cam 类的构造函数。
      * 在这里按顺序调用各个外设的初始化函数。
      */
     CompactWifiBoardS3Cam() :
-        boot_button_(BOOT_BUTTON_GPIO) {
+        boot_button_(BOOT_BUTTON_GPIO), lock_control_(nullptr) {
         InitializeSpi();
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        InitializeLockControl();
         // 如果定义了背光引脚，则恢复上次保存的亮度
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
@@ -302,6 +318,14 @@ public:
      */
     virtual Camera* GetCamera() override {
         return camera_;
+    }
+
+    /**
+     * @brief 获取锁控服务的实例。
+     * @return xiaozhi::LockControlService* 指向锁控服务实例的指针。
+     */
+    xiaozhi::LockControlService* GetLockControl() {
+        return lock_control_;
     }
 };
 

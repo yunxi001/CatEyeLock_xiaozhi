@@ -319,4 +319,9 @@
 // 一个用于 MCP 协议测试的 GPIO，用于控制一个灯
 #define LAMP_GPIO GPIO_NUM_14
 
+// ========================== 锁控 UART 引脚定义 ==========================
+#define LOCK_UART_PORT      UART_NUM_1
+#define LOCK_UART_TX_PIN    GPIO_NUM_3
+#define LOCK_UART_RX_PIN    GPIO_NUM_14
+
 #endif // _BOARD_CONFIG_H_

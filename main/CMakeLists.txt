@@ -30,6 +30,8 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/websocket_protocol.cc"
             "video/video_stream_service.cc"
             "monitor/monitor_service.cc"
+            "lock_control/lock_protocol.cc"
+            "lock_control/lock_control.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
@@ -40,7 +42,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "protocols" "video" "monitor")
+set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "protocols" "video" "monitor" "lock_control")
 
 # Add board common files
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
