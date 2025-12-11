@@ -553,41 +553,9 @@ void Application::Start() {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
             }
-        } else if (strcmp(type->valuestring, "face_recognition") == 0) {
-            // 处理人脸识别结果
-            Schedule([this, root_copy = cJSON_Duplicate(root, 1)]() {
-                HandleFaceRecognitionResult(root_copy);
-                cJSON_Delete(root_copy);
-            });
-        } else if (strcmp(type->valuestring, "lock_control") == 0) {
-            // 处理锁控命令
-            auto command = cJSON_GetObjectItem(root, "command");
-            if (cJSON_IsString(command)) {
-                ESP_LOGI(TAG, "Lock control command: %s", command->valuestring);
-                Schedule([this, cmd = std::string(command->valuestring), root_copy = cJSON_Duplicate(root, 1)]() {
-                    if (!lock_control_) {
-                        ESP_LOGW(TAG, "Lock control service not available");
-                        cJSON_Delete(root_copy);
-                        return;
-                    }
-                    
-                    if (cmd == "unlock") {
-                        lock_control_->SendUnlock();
-                    } else if (cmd == "temp_code") {
-                        auto code = cJSON_GetObjectItem(root_copy, "code");
-                        if (cJSON_IsString(code)) {
-                            lock_control_->SendTempCode(code->valuestring);
-                        }
-                    } else if (cmd == "alarm_on") {
-                        auto level = cJSON_GetObjectItem(root_copy, "level");
-                        uint8_t alarm_level = cJSON_IsNumber(level) ? level->valueint : 1;
-                        lock_control_->SendAlarm(alarm_level);
-                    } else if (cmd == "alarm_off") {
-                        lock_control_->SendAlarmOff();
-                    }
-                    cJSON_Delete(root_copy);
-                });
-            }
+        } else if (HandleSmartLockJsonMessage(root, type->valuestring)) {
+            // v5.0 协议：智能门锁扩展消息（face_result, lock_control, dev_control, user_mgmt, heartbeat_ack）
+            // 已在 HandleSmartLockJsonMessage() 中处理
         } else if (strcmp(type->valuestring, "alert") == 0) {
             auto status = cJSON_GetObjectItem(root, "status");
             auto message = cJSON_GetObjectItem(root, "message");
@@ -615,10 +583,20 @@ void Application::Start() {
     });
     bool protocol_started = protocol_->Start();
 
-    // 初始化锁控服务（仅在支持的板子上）
-    // 注意：这里需要根据实际板子类型来获取锁控服务
-    // 暂时设置为 nullptr，后续在板子初始化时会设置
-    lock_control_ = nullptr;
+    // 初始化锁控服务（从板级获取）
+    lock_control_ = Board::GetInstance().GetLockControl();
+    if (lock_control_) {
+        ESP_LOGI(TAG, "锁控服务已获取，设置事件回调");
+        // 设置事件回调，将事件调度到主循环处理
+        lock_control_->SetEventCallback([this](const xiaozhi::LockMessage& msg) {
+            // 使用 Schedule 将事件处理调度到主循环，避免在 UART 任务中执行耗时操作
+            Schedule([this, msg]() {
+                HandleLockEvent(msg);
+            });
+        });
+    } else {
+        ESP_LOGW(TAG, "当前板级不支持锁控服务");
+    }
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
@@ -1064,244 +1042,752 @@ bool Application::IsMonitorMode() const {
 
 // ==================== 锁控相关函数 ====================
 
+// ============================================================================
+// 锁控事件处理（智能门锁扩展功能）
+// ============================================================================
+
+/**
+ * @brief 处理 STM32 锁控模块上报的事件
+ * 
+ * 根据消息类别分发处理：
+ * - RPT (0x01): 事件上报、开锁日志、环境数据、状态上报
+ * - SYS (0x00): ACK 响应、心跳响应
+ * - USER (0x03): 用户管理反馈（指纹、NFC）
+ * 
+ * @param msg 锁控消息结构体
+ */
 void Application::HandleLockEvent(const xiaozhi::LockMessage& msg) {
-    ESP_LOGI(TAG, "Received lock event: CAT=0x%02X, TYPE=0x%02X", msg.category, msg.type);
+    ESP_LOGI(TAG, "收到锁控事件: CAT=0x%02X, TYPE=0x%02X", msg.category, msg.type);
     
-    // 如果处于监控模式，忽略锁控事件
+    // 监控模式下忽略锁控事件，避免冲突
     if (IsMonitorMode()) {
-        ESP_LOGW(TAG, "Ignoring lock event in monitor mode");
+        ESP_LOGW(TAG, "监控模式中，忽略锁控事件");
         return;
     }
     
-    // 根据事件类型分发处理
-    if (msg.IsEvent()) {
-        switch (msg.type) {
-            case static_cast<uint8_t>(xiaozhi::EventType::DOORBELL_PRESSED):
-                ESP_LOGI(TAG, "Doorbell pressed - triggering face recognition");
-                TriggerFaceRecognition();
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::HUMAN_DETECTED):
-                ESP_LOGI(TAG, "Human detected - triggering face recognition");
-                TriggerFaceRecognition();
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::LOCK_TAMPER):
-                ESP_LOGI(TAG, "Lock tamper detected");
-                HandleTamperAlert(msg.data[0]);
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::PERSON_LEFT):
-                ESP_LOGI(TAG, "Person left");
-                Alert("", "再见", "", "");
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::PERSON_ENTERED):
-                ESP_LOGI(TAG, "Person entered");
-                Alert("", "欢迎回家", "", "");
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::DOOR_NOT_CLOSED):
-                ESP_LOGI(TAG, "Door not closed");
-                HandleDoorNotClosed();
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::PASSWORD_ERROR):
-                ESP_LOGI(TAG, "Password error");
-                Alert("", "密码错误", "", "");
-                break;
-                
-            case static_cast<uint8_t>(xiaozhi::EventType::LOCK_LOCKED):
-                ESP_LOGI(TAG, "Lock locked");
-                Alert("", "已锁定", "", "");
-                break;
-                
-            default:
-                ESP_LOGW(TAG, "Unknown event type: 0x%02X", msg.type);
-                break;
-        }
+    // 根据消息类别分发处理
+    if (msg.IsRpt()) {
+        HandleLockReportMessage(msg);
+    } else if (msg.IsSys()) {
+        HandleLockSystemMessage(msg);
+    } else if (msg.IsUser()) {
+        HandleLockUserMessage(msg);
     }
 }
 
-void Application::TriggerFaceRecognition() {
-    int64_t start_time = esp_timer_get_time();
-    ESP_LOGI(TAG, "Face recognition triggered");
-    
-    // 0. 检查是否已经在进行人脸识别
-    if (face_recognition_in_progress_) {
-        ESP_LOGW(TAG, "Face recognition already in progress, ignoring trigger");
+/**
+ * @brief 处理 STM32 上报消息 (CAT = 0x01)
+ * 
+ * 包括：事件上报、开锁日志、环境数据、状态上报、密码查询结果
+ */
+void Application::HandleLockReportMessage(const xiaozhi::LockMessage& msg) {
+    switch (msg.type) {
+        case static_cast<uint8_t>(xiaozhi::RptType::RPT_EVENT): {
+            // 事件上报：data[0]=事件ID, data[1]=参数
+            uint8_t event_id = msg.data[0];
+            uint8_t param = msg.data[1];
+            
+            std::string event_name;
+            switch (event_id) {
+                case static_cast<uint8_t>(xiaozhi::EventId::EVT_DOORBELL):
+                    event_name = "bell";
+                    ESP_LOGI(TAG, "门铃按下 - 触发人脸识别");
+                    TriggerFaceRecognition();
+                    break;
+                    
+                case static_cast<uint8_t>(xiaozhi::EventId::EVT_PIR):
+                    event_name = "pir_trigger";
+                    ESP_LOGI(TAG, "PIR 检测到人体 (持续 %d 秒) - 触发人脸识别", param);
+                    TriggerFaceRecognition();
+                    break;
+                    
+                case static_cast<uint8_t>(xiaozhi::EventId::EVT_TAMPER):
+                    event_name = "tamper";
+                    ESP_LOGI(TAG, "撬锁报警 (级别 %d)", param);
+                    HandleTamperAlert(param);
+                    break;
+                    
+                case static_cast<uint8_t>(xiaozhi::EventId::EVT_DOOR_OPEN):
+                    event_name = "door_open";
+                    ESP_LOGI(TAG, "门未关超时 (%d 分钟)", param);
+                    HandleDoorNotClosed();
+                    break;
+                    
+                case static_cast<uint8_t>(xiaozhi::EventId::EVT_LOW_BATTERY):
+                    event_name = "low_battery";
+                    ESP_LOGW(TAG, "低电量警告: %d%%", param);
+                    Alert("", "电量低", "", "");
+                    break;
+                    
+                default:
+                    ESP_LOGW(TAG, "未知事件 ID: 0x%02X", event_id);
+                    break;
+            }
+            
+            // v5.0 协议：上报事件到服务器
+            if (!event_name.empty() && protocol_ && protocol_->IsAudioChannelOpened()) {
+                protocol_->SendEventReport(event_name, param);
+            }
+            break;
+        }
+        
+        case static_cast<uint8_t>(xiaozhi::RptType::RPT_UNLOCK): {
+            // 本地开锁日志：data[0]=方式, data[1]=用户ID, data[2]=结果
+            uint8_t method = msg.data[0];
+            uint8_t id = msg.data[1];
+            uint8_t result = msg.data[2];
+            ESP_LOGI(TAG, "开锁日志: 方式=%d, ID=%d, 结果=%d", method, id, result);
+            
+            // v5.0 协议：转发开锁日志到服务器
+            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                std::string method_str = GetUnlockMethodString(method);
+                bool success = (result == 0);
+                int fail_count = success ? 0 : result;
+                protocol_->SendLogReport(method_str, id, success, fail_count);
+            }
+            break;
+        }
+        
+        case static_cast<uint8_t>(xiaozhi::RptType::RPT_ENV): {
+            // 环境数据：data[0]=电量, data[1-2]=光照(大端)
+            uint8_t battery = msg.data[0];
+            uint16_t lux = (msg.data[1] << 8) | msg.data[2];
+            ESP_LOGI(TAG, "环境数据: 电量=%d%%, 光照=%d Lux", battery, lux);
+            
+            // 保存环境数据，用于状态上报
+            last_battery_ = battery;
+            last_lux_ = lux;
+            break;
+        }
+        
+        case static_cast<uint8_t>(xiaozhi::RptType::RPT_STATE): {
+            // 状态上报：data[0]=锁状态, data[1]=灯状态
+            bool lock_open = (msg.data[0] == 0x01);
+            bool light_on = (msg.data[1] == 0x01);
+            ESP_LOGI(TAG, "状态: 锁=%s, 灯=%s", lock_open ? "开" : "关", light_on ? "亮" : "灭");
+            
+            // 保存状态数据
+            last_lock_state_ = lock_open ? 1 : 0;
+            last_light_state_ = light_on ? 1 : 0;
+            
+            // v5.0 协议：上报状态到服务器
+            if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                protocol_->SendStatusReport(last_battery_, last_lux_, 
+                                            last_lock_state_, last_light_state_);
+            }
+            break;
+        }
+        
+        case static_cast<uint8_t>(xiaozhi::RptType::RPT_PWD): {
+            // 密码查询结果
+            uint32_t pwd = xiaozhi::LockProtocol::DecodePasswordHex(msg.data);
+            ESP_LOGI(TAG, "当前密码: %06lu", (unsigned long)pwd);
+            break;
+        }
+        
+        default:
+            ESP_LOGW(TAG, "未知上报类型: 0x%02X", msg.type);
+            break;
+    }
+}
+
+/**
+ * @brief 处理系统消息 (CAT = 0x00)
+ * 
+ * 包括：ACK_OK、ACK_ERR、PONG
+ */
+void Application::HandleLockSystemMessage(const xiaozhi::LockMessage& msg) {
+    if (msg.IsAckOk()) {
+        ESP_LOGD(TAG, "收到 ACK_OK，原指令 TYPE=0x%02X", msg.data[0]);
+    } else if (msg.IsAckErr()) {
+        ESP_LOGW(TAG, "收到 ACK_ERR，原指令 TYPE=0x%02X，错误码=0x%02X", msg.data[0], msg.data[1]);
+    } else if (msg.type == static_cast<uint8_t>(xiaozhi::SysType::SYS_PONG)) {
+        ESP_LOGD(TAG, "收到心跳响应");
+    }
+}
+
+/**
+ * @brief 处理用户管理反馈消息 (CAT = 0x03)
+ * 
+ * 包括：指纹录入反馈、NFC 录入反馈
+ * v5.0 协议：转发用户管理结果到服务器
+ */
+void Application::HandleLockUserMessage(const xiaozhi::LockMessage& msg) {
+    if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
         return;
     }
     
-    // 1. 检查设备状态是否为 Idle
-    if (device_state_ != kDeviceStateIdle) {
-        ESP_LOGW(TAG, "Device not idle, ignoring face recognition trigger (state=%s)", 
+    std::string category;
+    std::string command;
+    bool result = false;
+    int val = 0;
+    std::string result_msg;
+    
+    // 判断是指纹还是 NFC 反馈
+    if (msg.type == static_cast<uint8_t>(xiaozhi::UserFpCmd::FP_RESP)) {
+        category = "finger";
+        uint8_t status = msg.data[0];
+        
+        switch (status) {
+            case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_PRESS_FINGER):
+                ESP_LOGI(TAG, "指纹录入：请按手指 (第 %d 次)", msg.data[1]);
+                return;  // 中间状态，不上报
+            case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_LIFT_FINGER):
+                ESP_LOGI(TAG, "指纹录入：请抬起手指");
+                return;  // 中间状态，不上报
+            case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_SUCCESS):
+                command = "add";
+                result = true;
+                val = msg.data[1];  // 新分配的 ID
+                result_msg = "Success";
+                ESP_LOGI(TAG, "指纹录入成功，ID=%d", val);
+                break;
+            case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_FAILED):
+                command = "add";
+                result = false;
+                val = msg.data[1];  // 错误码
+                result_msg = "Failed";
+                ESP_LOGW(TAG, "指纹操作失败，错误码=0x%02X", val);
+                break;
+            case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_COUNT_RESP):
+                command = "query";
+                result = true;
+                val = msg.data[1];  // 总数
+                result_msg = "Success";
+                ESP_LOGI(TAG, "指纹数量：%d", val);
+                break;
+            default:
+                ESP_LOGW(TAG, "未知指纹反馈状态: 0x%02X", status);
+                return;
+        }
+    } else if (msg.type == static_cast<uint8_t>(xiaozhi::UserNfcCmd::NFC_RESP)) {
+        category = "nfc";
+        uint8_t status = msg.data[0];
+        
+        // NFC 反馈状态码与指纹相同
+        switch (status) {
+            case 0x03:  // 成功
+                command = "add";
+                result = true;
+                val = msg.data[1];
+                result_msg = "Success";
+                ESP_LOGI(TAG, "NFC 录入成功，ID=%d", val);
+                break;
+            case 0x04:  // 失败
+                command = "add";
+                result = false;
+                val = msg.data[1];
+                result_msg = "Failed";
+                ESP_LOGW(TAG, "NFC 操作失败，错误码=0x%02X", val);
+                break;
+            case 0x05:  // 数量
+                command = "query";
+                result = true;
+                val = msg.data[1];
+                result_msg = "Success";
+                ESP_LOGI(TAG, "NFC 数量：%d", val);
+                break;
+            default:
+                ESP_LOGW(TAG, "未知 NFC 反馈状态: 0x%02X", status);
+                return;
+        }
+    } else {
+        ESP_LOGW(TAG, "未知用户管理反馈类型: 0x%02X", msg.type);
+        return;
+    }
+    
+    // 上报结果到服务器
+    protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
+}
+
+/**
+ * @brief 获取开锁方式字符串
+ * @param method 开锁方式枚举值
+ * @return 开锁方式字符串（用于服务器上报）
+ */
+std::string Application::GetUnlockMethodString(uint8_t method) {
+    switch (method) {
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_FINGERPRINT):
+            return "finger";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_NFC):
+            return "nfc";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_PASSWORD):
+            return "pwd";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_REMOTE):
+            return "remote";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_KEY):
+            return "key";
+        default:
+            return "unknown";
+    }
+}
+
+// ============================================================================
+// 人脸识别功能
+// ============================================================================
+
+/**
+ * @brief 触发人脸识别流程
+ * 
+ * 完整流程：
+ * 1. 检查状态和内存
+ * 2. 确保音频通道已打开
+ * 3. 拍照并 JPEG 编码
+ * 4. 发送图像到服务器
+ * 5. 等待服务器返回识别结果
+ * 
+ * 注意：此函数应在主循环中调用，避免阻塞 UART 任务
+ */
+void Application::TriggerFaceRecognition() {
+    int64_t start_time = esp_timer_get_time();
+    ESP_LOGI(TAG, "触发人脸识别");
+    
+    // 检查是否已经在进行人脸识别（防止重复触发）
+    if (face_recognition_in_progress_) {
+        ESP_LOGW(TAG, "人脸识别正在进行中，忽略本次触发");
+        return;
+    }
+    
+    // 检查设备状态（仅在空闲或聆听状态下允许）
+    if (device_state_ != kDeviceStateIdle && device_state_ != kDeviceStateListening) {
+        ESP_LOGW(TAG, "设备非空闲状态，忽略人脸识别触发 (state=%s)", 
                  STATE_STRINGS[device_state_]);
         return;
     }
     
-    // 设置标志
+    // 设置进行中标志
     face_recognition_in_progress_ = true;
     
-    // 1.5. 检查可用内存
+    // 检查可用内存（JPEG 编码需要较大内存）
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    const size_t MIN_FREE_MEMORY = 100 * 1024; // 100KB
+    const size_t MIN_FREE_MEMORY = 100 * 1024;  // 最小 100KB
     if (free_psram < MIN_FREE_MEMORY) {
-        ESP_LOGW(TAG, "Low memory, rejecting face recognition (free PSRAM: %zu KB)", 
-                 free_psram / 1024);
+        ESP_LOGW(TAG, "内存不足，拒绝人脸识别 (可用 PSRAM: %zu KB)", free_psram / 1024);
+        face_recognition_in_progress_ = false;
         return;
     }
-    ESP_LOGI(TAG, "Memory check passed (free PSRAM: %zu KB)", free_psram / 1024);
+    ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %zu KB)", free_psram / 1024);
     
-    // 2. 检查摄像头是否可用
+    // 检查摄像头是否可用
     auto& board = Board::GetInstance();
     auto camera = board.GetCamera();
     if (!camera) {
-        ESP_LOGE(TAG, "Camera not available, aborting face recognition");
+        ESP_LOGE(TAG, "摄像头不可用，中止人脸识别");
         face_recognition_in_progress_ = false;
         return;
     }
     
-    // 3. 检查音频通道是否打开
+    // 确保音频通道已打开（用于发送图像和接收结果）
     if (!protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "Opening audio channel for face recognition");
+        ESP_LOGI(TAG, "为人脸识别打开音频通道");
         protocol_->OpenAudioChannel();
     }
     
     int64_t capture_start = esp_timer_get_time();
-    ESP_LOGI(TAG, "Starting face recognition process (trigger->start: %lld ms)", 
+    ESP_LOGI(TAG, "开始人脸识别流程 (触发->开始: %lld ms)", 
              (capture_start - start_time) / 1000);
     
-    // 4. 拍照
+    // 拍照
     if (!camera->Capture()) {
-        ESP_LOGE(TAG, "Failed to capture photo");
+        ESP_LOGE(TAG, "拍照失败");
         face_recognition_in_progress_ = false;
         return;
     }
     
     int64_t capture_end = esp_timer_get_time();
-    ESP_LOGI(TAG, "Photo captured successfully (capture time: %lld ms)", 
-             (capture_end - capture_start) / 1000);
+    ESP_LOGI(TAG, "拍照成功 (耗时: %lld ms)", (capture_end - capture_start) / 1000);
     
-    // 5. JPEG 编码
-    // 注意：Camera 基类没有 CaptureJpeg 方法，需要转换为 Esp32Camera
+    // JPEG 编码（仅 ESP32-S3 支持）
     #ifndef CONFIG_IDF_TARGET_ESP32
     auto esp32_camera = dynamic_cast<Esp32Camera*>(camera);
     if (!esp32_camera) {
-        ESP_LOGE(TAG, "Camera is not Esp32Camera, cannot encode JPEG");
+        ESP_LOGE(TAG, "摄像头类型不支持 JPEG 编码");
+        face_recognition_in_progress_ = false;
         return;
     }
     
     uint8_t* jpeg_data = nullptr;
     size_t jpeg_size = 0;
     if (!esp32_camera->CaptureJpeg(&jpeg_data, &jpeg_size, 80)) {
-        ESP_LOGE(TAG, "Failed to encode JPEG");
+        ESP_LOGE(TAG, "JPEG 编码失败");
         face_recognition_in_progress_ = false;
         return;
     }
     
-    // Check if memory allocation succeeded
+    // 检查内存分配是否成功
     if (jpeg_data == nullptr || jpeg_size == 0) {
-        ESP_LOGE(TAG, "JPEG encoding failed: no data allocated");
+        ESP_LOGE(TAG, "JPEG 编码失败：未分配数据");
         face_recognition_in_progress_ = false;
         return;
     }
     
     int64_t encode_end = esp_timer_get_time();
-    ESP_LOGI(TAG, "JPEG encoded: %zu bytes (encode time: %lld ms)", 
+    ESP_LOGI(TAG, "JPEG 编码完成: %zu 字节 (耗时: %lld ms)", 
              jpeg_size, (encode_end - capture_end) / 1000);
     
-    // 6. 发送视频帧
+    // 发送人脸识别图像
     int64_t send_start = esp_timer_get_time();
-    int64_t timestamp = send_start / 1000; // 转换为毫秒
-    int width = esp32_camera->GetFrameWidth();
-    int height = esp32_camera->GetFrameHeight();
+    uint16_t width = esp32_camera->GetFrameWidth();
+    uint16_t height = esp32_camera->GetFrameHeight();
     #else
-    ESP_LOGE(TAG, "Face recognition not supported on ESP32");
+    ESP_LOGE(TAG, "ESP32 不支持人脸识别");
+    face_recognition_in_progress_ = false;
     return;
     #endif
     
-    if (!protocol_->SendVideo(jpeg_data, jpeg_size, timestamp, width, height)) {
-        ESP_LOGE(TAG, "Failed to send video frame");
+    if (!protocol_->SendFaceRecognition(jpeg_data, jpeg_size, width, height)) {
+        ESP_LOGE(TAG, "发送人脸识别图像失败");
         heap_caps_free(jpeg_data);
         face_recognition_in_progress_ = false;
         return;
     }
     
     int64_t send_end = esp_timer_get_time();
-    ESP_LOGI(TAG, "Video frame sent successfully (send time: %lld ms)", 
-             (send_end - send_start) / 1000);
+    ESP_LOGI(TAG, "人脸识别图像发送成功 (耗时: %lld ms)", (send_end - send_start) / 1000);
     
-    // 7. 释放内存
+    // 释放 JPEG 数据内存
     heap_caps_free(jpeg_data);
     
     int64_t total_time = (send_end - start_time) / 1000;
-    ESP_LOGI(TAG, "Face recognition complete (total time: %lld ms)", total_time);
+    ESP_LOGI(TAG, "人脸识别流程完成 (总耗时: %lld ms)", total_time);
     
-    // 清除标志
+    // 清除进行中标志
     face_recognition_in_progress_ = false;
 }
 
+/**
+ * @brief 处理服务器返回的人脸识别结果
+ * 
+ * JSON 格式：
+ * {
+ *   "type": "face_result",
+ *   "result": "known" | "unknown" | "no_face",
+ *   "access": { "granted": true/false }
+ * }
+ * 
+ * @param root JSON 根节点
+ */
 void Application::HandleFaceRecognitionResult(cJSON* root) {
-    ESP_LOGI(TAG, "Handling face recognition result");
+    ESP_LOGI(TAG, "处理人脸识别结果");
     
-    // 1. 解析 result 字段
+    // 解析 result 字段
     auto result = cJSON_GetObjectItem(root, "result");
     if (!cJSON_IsString(result)) {
-        ESP_LOGW(TAG, "Invalid face recognition result: missing result field");
+        ESP_LOGW(TAG, "无效的人脸识别结果：缺少 result 字段");
         return;
     }
     
-    ESP_LOGI(TAG, "Face recognition result: %s", result->valuestring);
+    ESP_LOGI(TAG, "人脸识别结果: %s", result->valuestring);
     
-    // 2. 解析 access 字段
+    // 解析 access 字段
     auto access = cJSON_GetObjectItem(root, "access");
     if (!cJSON_IsObject(access)) {
-        ESP_LOGW(TAG, "Invalid face recognition result: missing access field");
+        ESP_LOGW(TAG, "无效的人脸识别结果：缺少 access 字段");
         return;
     }
     
     auto granted = cJSON_GetObjectItem(access, "granted");
     bool access_granted = cJSON_IsTrue(granted);
     
-    // 3. 如果授权，发送开锁命令
+    // 如果识别为已知用户且授权通过，发送开锁命令
     if (strcmp(result->valuestring, "known") == 0 && access_granted) {
-        ESP_LOGI(TAG, "Access granted, sending unlock command");
+        ESP_LOGI(TAG, "授权通过，发送开锁命令");
         if (lock_control_) {
             lock_control_->SendUnlock();
         } else {
-            ESP_LOGW(TAG, "Lock control service not available");
+            ESP_LOGW(TAG, "锁控服务不可用");
         }
     } else {
-        ESP_LOGI(TAG, "Access denied or unknown person");
+        ESP_LOGI(TAG, "授权拒绝或未知人员");
     }
 }
 
+// ============================================================================
+// 安全告警处理
+// ============================================================================
+
+/**
+ * @brief 处理撬锁报警
+ * 
+ * 触发蜂鸣器报警、上报服务器、显示警告。
+ * 
+ * @param level 报警级别（影响蜂鸣器响铃次数）
+ */
 void Application::HandleTamperAlert(uint8_t level) {
-    ESP_LOGI(TAG, "Handling tamper alert, level=%d", level);
+    ESP_LOGI(TAG, "处理撬锁报警，级别=%d", level);
     
-    // 1. 激活警报
+    // 激活蜂鸣器报警
     if (lock_control_) {
-        lock_control_->SendAlarm(level);
+        uint8_t beep_count = level > 0 ? level * 3 : 3;
+        lock_control_->SendBeep(beep_count, xiaozhi::BeepFreq::BEEP_ALARM);
     }
     
-    // 2. 上报服务器
-    char payload[128];
-    snprintf(payload, sizeof(payload), 
-             "{\"type\":\"lock_alert\",\"event\":\"tamper\",\"level\":%d}", level);
-    SendMcpMessage(payload);
+    // v5.0 协议：上报服务器
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->SendEventReport("tamper", level);
+    }
     
-    // 3. 显示警报
+    // 显示警报
     Alert("警报", "检测到暴力破坏", "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
 }
 
+/**
+ * @brief 处理门未关提醒
+ * 
+ * 上报服务器并显示提示。
+ */
 void Application::HandleDoorNotClosed() {
-    ESP_LOGI(TAG, "Handling door not closed");
+    ESP_LOGI(TAG, "处理门未关提醒");
     
-    // 1. 上报服务器
-    const char* payload = "{\"type\":\"lock_alert\",\"event\":\"door_not_closed\"}";
-    SendMcpMessage(payload);
+    // v5.0 协议：上报服务器
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->SendEventReport("door_open", 0);
+    }
     
-    // 2. 显示提示
+    // 显示提示
     Alert("提示", "门未关严实", "door_open", "");
+}
+
+// ============================================================================
+// v5.0 协议：智能门锁扩展消息处理
+// ============================================================================
+
+/**
+ * @brief 处理智能门锁扩展 JSON 消息
+ * 
+ * 此函数处理智能猫眼门锁系统新增的 JSON 消息类型，
+ * 与原有小智语音助手功能分离，便于维护。
+ * 
+ * 支持的消息类型：
+ * - face_result / face_recognition: 人脸识别结果
+ * - lock_control: 锁控命令（开锁、关锁、临时密码）
+ * - dev_control: 硬件外设控制（蜂鸣器、OLED、补光灯）
+ * - user_mgmt: 用户管理（指纹、NFC、密码）
+ * - heartbeat_ack: 心跳响应
+ * 
+ * @param root JSON 根节点
+ * @param type 消息类型字符串
+ * @return 如果消息被处理返回 true，否则返回 false
+ */
+bool Application::HandleSmartLockJsonMessage(const cJSON* root, const char* type) {
+    
+    // -------------------------------------------------------------------------
+    // 人脸识别结果（兼容旧版 face_recognition 和新版 face_result）
+    // -------------------------------------------------------------------------
+    if (strcmp(type, "face_recognition") == 0 || strcmp(type, "face_result") == 0) {
+        auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+        std::string msg_id_str = cJSON_IsString(msg_id) ? msg_id->valuestring : "";
+        
+        Schedule([this, root_copy = cJSON_Duplicate(root, 1), msg_id_str]() {
+            // 发送 ACK 响应
+            if (!msg_id_str.empty()) {
+                protocol_->SendAck(msg_id_str, 0, "OK");
+            }
+            HandleFaceRecognitionResult(root_copy);
+            cJSON_Delete(root_copy);
+        });
+        return true;
+    }
+    
+    // -------------------------------------------------------------------------
+    // 锁控命令：unlock（开锁）、lock（关锁）、temp_code（临时密码）
+    // -------------------------------------------------------------------------
+    if (strcmp(type, "lock_control") == 0) {
+        auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+        auto command = cJSON_GetObjectItem(root, "command");
+        std::string msg_id_str = cJSON_IsString(msg_id) ? msg_id->valuestring : "";
+        
+        if (cJSON_IsString(command)) {
+            ESP_LOGI(TAG, "锁控命令: %s (msg_id=%s)", command->valuestring, msg_id_str.c_str());
+            
+            Schedule([this, cmd = std::string(command->valuestring), 
+                      root_copy = cJSON_Duplicate(root, 1), msg_id_str]() {
+                int ack_code = 0;
+                std::string ack_msg = "OK";
+                
+                if (!lock_control_) {
+                    ESP_LOGW(TAG, "锁控服务不可用");
+                    ack_code = 3;  // 硬件故障
+                    ack_msg = "Lock control not available";
+                } else {
+                    if (cmd == "unlock") {
+                        // 开锁命令，可选 duration 参数
+                        auto duration = cJSON_GetObjectItem(root_copy, "duration");
+                        uint8_t hold_seconds = cJSON_IsNumber(duration) ? duration->valueint : 0;
+                        lock_control_->SendUnlock(hold_seconds);
+                    } else if (cmd == "lock") {
+                        // 关锁命令
+                        lock_control_->SendLockDoor();
+                    } else if (cmd == "temp_code") {
+                        // 设置临时密码
+                        auto code = cJSON_GetObjectItem(root_copy, "code");
+                        if (cJSON_IsString(code)) {
+                            uint32_t pwd = atoi(code->valuestring);
+                            lock_control_->SetPassword(pwd);
+                        }
+                    } else {
+                        ack_code = 2;  // 参数错误
+                        ack_msg = "Unknown command";
+                    }
+                }
+                
+                // 发送 ACK 响应
+                if (!msg_id_str.empty()) {
+                    protocol_->SendAck(msg_id_str, ack_code, ack_msg);
+                }
+                cJSON_Delete(root_copy);
+            });
+        }
+        return true;
+    }
+    
+    // -------------------------------------------------------------------------
+    // 硬件外设控制：beep（蜂鸣器）、oled（显示）、light（补光灯）
+    // -------------------------------------------------------------------------
+    if (strcmp(type, "dev_control") == 0) {
+        auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+        auto target = cJSON_GetObjectItem(root, "target");
+        std::string msg_id_str = cJSON_IsString(msg_id) ? msg_id->valuestring : "";
+        
+        if (cJSON_IsString(target)) {
+            ESP_LOGI(TAG, "外设控制: target=%s (msg_id=%s)", target->valuestring, msg_id_str.c_str());
+            
+            Schedule([this, target_str = std::string(target->valuestring),
+                      root_copy = cJSON_Duplicate(root, 1), msg_id_str]() {
+                int ack_code = 0;
+                std::string ack_msg = "OK";
+                
+                if (!lock_control_) {
+                    ack_code = 3;
+                    ack_msg = "Lock control not available";
+                } else if (target_str == "beep") {
+                    // 蜂鸣器控制：count（次数）、mode（short/long/alarm）
+                    auto count = cJSON_GetObjectItem(root_copy, "count");
+                    auto mode = cJSON_GetObjectItem(root_copy, "mode");
+                    uint8_t beep_count = cJSON_IsNumber(count) ? count->valueint : 1;
+                    xiaozhi::BeepFreq freq = xiaozhi::BeepFreq::BEEP_SHORT;
+                    
+                    if (cJSON_IsString(mode)) {
+                        if (strcmp(mode->valuestring, "long") == 0) {
+                            freq = xiaozhi::BeepFreq::BEEP_LONG;
+                        } else if (strcmp(mode->valuestring, "alarm") == 0) {
+                            freq = xiaozhi::BeepFreq::BEEP_ALARM;
+                        }
+                    }
+                    lock_control_->SendBeep(beep_count, freq);
+                } else if (target_str == "oled") {
+                    // OLED 图标显示：icon（图标编号）
+                    auto icon = cJSON_GetObjectItem(root_copy, "icon");
+                    if (cJSON_IsNumber(icon)) {
+                        lock_control_->SendOledIcon(static_cast<xiaozhi::OledIcon>(icon->valueint));
+                    }
+                } else if (target_str == "light") {
+                    // 补光灯控制：action（on/off/auto）
+                    auto action = cJSON_GetObjectItem(root_copy, "action");
+                    if (cJSON_IsString(action)) {
+                        if (strcmp(action->valuestring, "on") == 0) {
+                            lock_control_->SendLightOn();
+                        } else if (strcmp(action->valuestring, "off") == 0) {
+                            lock_control_->SendLightOff();
+                        } else if (strcmp(action->valuestring, "auto") == 0) {
+                            lock_control_->SendLightAuto();
+                        }
+                    }
+                } else {
+                    ack_code = 7;  // 不支持
+                    ack_msg = "Unknown target";
+                }
+                
+                // 发送 ACK 响应
+                if (!msg_id_str.empty()) {
+                    protocol_->SendAck(msg_id_str, ack_code, ack_msg);
+                }
+                cJSON_Delete(root_copy);
+            });
+        }
+        return true;
+    }
+    
+    // -------------------------------------------------------------------------
+    // 用户管理：finger（指纹）、nfc、password（密码）
+    // -------------------------------------------------------------------------
+    if (strcmp(type, "user_mgmt") == 0) {
+        auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+        auto category = cJSON_GetObjectItem(root, "category");
+        auto command = cJSON_GetObjectItem(root, "command");
+        std::string msg_id_str = cJSON_IsString(msg_id) ? msg_id->valuestring : "";
+        
+        if (cJSON_IsString(category) && cJSON_IsString(command)) {
+            ESP_LOGI(TAG, "用户管理: category=%s, command=%s (msg_id=%s)", 
+                     category->valuestring, command->valuestring, msg_id_str.c_str());
+            
+            Schedule([this, cat = std::string(category->valuestring),
+                      cmd = std::string(command->valuestring),
+                      root_copy = cJSON_Duplicate(root, 1), msg_id_str]() {
+                int ack_code = 0;
+                std::string ack_msg = "OK";
+                
+                if (!lock_control_) {
+                    ack_code = 3;
+                    ack_msg = "Lock control not available";
+                } else {
+                    auto user_id = cJSON_GetObjectItem(root_copy, "user_id");
+                    uint8_t uid = cJSON_IsNumber(user_id) ? user_id->valueint : 0;
+                    
+                    if (cat == "finger") {
+                        // 指纹管理：add/del/clear/query
+                        if (cmd == "add") {
+                            lock_control_->FingerprintEnroll(uid);
+                        } else if (cmd == "del") {
+                            lock_control_->FingerprintDelete(uid);
+                        } else if (cmd == "clear") {
+                            lock_control_->FingerprintClear();
+                        } else if (cmd == "query") {
+                            lock_control_->FingerprintQueryCount();
+                        }
+                    } else if (cat == "nfc") {
+                        // NFC 管理：add/del/clear/query
+                        if (cmd == "add") {
+                            lock_control_->NfcEnroll();
+                        } else if (cmd == "del") {
+                            lock_control_->NfcDelete(uid);
+                        } else if (cmd == "clear") {
+                            lock_control_->NfcClear();
+                        } else if (cmd == "query") {
+                            lock_control_->NfcQueryCount();
+                        }
+                    } else if (cat == "password") {
+                        // 密码管理：set/query
+                        if (cmd == "set") {
+                            auto payload = cJSON_GetObjectItem(root_copy, "payload");
+                            if (cJSON_IsString(payload)) {
+                                uint32_t pwd = atoi(payload->valuestring);
+                                lock_control_->SetPassword(pwd);
+                            }
+                        } else if (cmd == "query") {
+                            lock_control_->QueryPassword();
+                        }
+                    }
+                }
+                
+                // 发送 ACK 响应
+                if (!msg_id_str.empty()) {
+                    protocol_->SendAck(msg_id_str, ack_code, ack_msg);
+                }
+                cJSON_Delete(root_copy);
+            });
+        }
+        return true;
+    }
+    
+    // -------------------------------------------------------------------------
+    // 心跳响应
+    // -------------------------------------------------------------------------
+    if (strcmp(type, "heartbeat_ack") == 0) {
+        ESP_LOGD(TAG, "收到心跳响应");
+        return true;
+    }
+    
+    // 未识别的消息类型
+    return false;
 }

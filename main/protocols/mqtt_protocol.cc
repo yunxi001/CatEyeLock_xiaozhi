@@ -220,6 +220,45 @@ bool MqttProtocol::SendVideo(const uint8_t* data, size_t size, uint32_t timestam
     return true;
 }
 
+bool MqttProtocol::SendFaceRecognition(const uint8_t* jpeg_data, size_t jpeg_size,
+                                        uint16_t width, uint16_t height) {
+    // 人脸识别图像发送（正常模式下使用）
+    // 直接发送 BinaryProtocol2 格式的二进制数据到专用主题
+    if (publish_topic_.empty()) {
+        ESP_LOGW(TAG, "无法发送人脸识别图像: 发布主题未设置");
+        return false;
+    }
+
+    if (jpeg_data == nullptr || jpeg_size == 0) {
+        ESP_LOGW(TAG, "无法发送人脸识别图像: 数据无效");
+        return false;
+    }
+
+    // 构建 BinaryProtocol2 格式的数据
+    // type=2 表示人脸识别图像
+    std::string serialized;
+    serialized.resize(sizeof(BinaryProtocol2) + jpeg_size);
+    auto bp2 = (BinaryProtocol2*)serialized.data();
+    bp2->version = htons(2);
+    bp2->type = htons(2);  // type=2: 人脸识别图像
+    bp2->reserved = htonl(((uint32_t)width << 16) | (uint32_t)height);
+    bp2->timestamp = htonl((uint32_t)(esp_timer_get_time() / 1000));
+    bp2->payload_size = htonl(jpeg_size);
+    memcpy(bp2->payload, jpeg_data, jpeg_size);
+
+    // 发布到人脸识别专用主题
+    std::string face_topic = publish_topic_ + "/face";
+    
+    ESP_LOGI(TAG, "发送人脸识别图像: %dx%d, 大小=%zu 字节", width, height, jpeg_size);
+    
+    if (!mqtt_->Publish(face_topic, serialized, false)) {
+        ESP_LOGE(TAG, "发送人脸识别图像失败");
+        return false;
+    }
+    
+    return true;
+}
+
 void MqttProtocol::CloseAudioChannel() {
     {
         std::lock_guard<std::mutex> lock(channel_mutex_);

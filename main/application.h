@@ -145,6 +145,12 @@ private:
     bool face_recognition_in_progress_ = false;         // 人脸识别是否正在进行
     TaskHandle_t check_new_version_task_handle_ = nullptr; // 检查新版本任务的句柄
     TaskHandle_t main_event_loop_task_handle_ = nullptr;   // 主事件循环任务的句柄
+    
+    // v5.0 协议：状态数据缓存（用于状态上报）
+    int last_battery_ = 0;                              // 最后一次电量
+    int last_lux_ = 0;                                  // 最后一次光照值
+    int last_lock_state_ = 0;                           // 最后一次锁状态
+    int last_light_state_ = 0;                          // 最后一次灯状态
 
     // --- 私有方法 ---
     void OnWakeWordDetected();                          // 唤醒词检测到的处理函数
@@ -153,12 +159,44 @@ private:
     void ShowActivationCode(const std::string& code, const std::string& message); // 显示激活码
     void SetListeningMode(ListeningMode mode);          // 设置聆听模式
     
-    // 锁控相关方法
-    void HandleLockEvent(const xiaozhi::LockMessage& msg); // 处理锁控事件
-    void TriggerFaceRecognition();                      // 触发人脸识别
-    void HandleFaceRecognitionResult(cJSON* root);      // 处理人脸识别结果
-    void HandleTamperAlert(uint8_t level);              // 处理暴力破坏警报
-    void HandleDoorNotClosed();                         // 处理门未关严实
+    // =========================================================================
+    // 锁控相关方法（智能门锁扩展功能）
+    // =========================================================================
+    
+    /** 处理 STM32 锁控模块上报的事件 */
+    void HandleLockEvent(const xiaozhi::LockMessage& msg);
+    
+    /** 处理上报消息 (CAT = 0x01) */
+    void HandleLockReportMessage(const xiaozhi::LockMessage& msg);
+    
+    /** 处理系统消息 (CAT = 0x00) */
+    void HandleLockSystemMessage(const xiaozhi::LockMessage& msg);
+    
+    /** 处理用户管理反馈消息 (CAT = 0x03) */
+    void HandleLockUserMessage(const xiaozhi::LockMessage& msg);
+    
+    /** 获取开锁方式字符串 */
+    std::string GetUnlockMethodString(uint8_t method);
+    
+    /** 触发人脸识别流程 */
+    void TriggerFaceRecognition();
+    
+    /** 处理服务器返回的人脸识别结果 */
+    void HandleFaceRecognitionResult(cJSON* root);
+    
+    /** 处理撬锁报警 */
+    void HandleTamperAlert(uint8_t level);
+    
+    /** 处理门未关提醒 */
+    void HandleDoorNotClosed();
+    
+    /**
+     * @brief 处理智能门锁扩展 JSON 消息
+     * @param root JSON 根节点
+     * @param type 消息类型字符串
+     * @return 如果消息被处理返回 true，否则返回 false
+     */
+    bool HandleSmartLockJsonMessage(const cJSON* root, const char* type);
 };
 
 

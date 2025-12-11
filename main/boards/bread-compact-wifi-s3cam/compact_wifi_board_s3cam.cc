@@ -324,7 +324,7 @@ public:
      * @brief 获取锁控服务的实例。
      * @return xiaozhi::LockControlService* 指向锁控服务实例的指针。
      */
-    xiaozhi::LockControlService* GetLockControl() {
+    xiaozhi::LockControlService* GetLockControl() override {
         return lock_control_;
     }
 };

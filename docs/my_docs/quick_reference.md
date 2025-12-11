@@ -1,253 +1,215 @@
-# 实时视频对讲功能 - 快速参考
+# 智能猫眼门禁系统 - 快速参考
 
-## 快速开始
-
-### 编译和烧录
+## 编译和烧录
 
 ```bash
-# 编译
-idf.py build
-
-# 烧录
-idf.py flash
-
-# 监控
-idf.py monitor
+idf.py set-target esp32s3   # 配置目标芯片
+idf.py build                # 编译
+idf.py flash                # 烧录
+idf.py monitor              # 监控日志
+idf.py fullclean && idf.py build  # 清理重编译
 ```
 
 ---
 
-## 命令参考
+## 服务器命令
 
-### 启动监控模式
-
-**WebSocket/MQTT 消息：**
-```json
-{
-  "type": "system",
-  "command": "start_monitor"
-}
-```
-
-**效果：**
-- 设备进入监控模式
-- 开始发送视频流
-- 继续双向音频传输
-
-### 停止监控模式
-
-**WebSocket/MQTT 消息：**
-```json
-{
-  "type": "system",
-  "command": "stop_monitor"
-}
-```
-
-**效果：**
-- 停止视频流
-- 设备返回正常模式
-
----
-
-## 设备状态
-
-| 状态 | 说明 |
-|------|------|
-| `idle` | 空闲状态 |
-| `monitor_connecting` | 监控模式连接中 |
-| `monitor_streaming` | 监控模式流媒体传输中 |
-
----
-
-## 消息格式
-
-### 视频帧元数据（设备→服务器）
+### 监控模式
 
 ```json
-{
-  "type": "video_frame",
-  "timestamp": 12345678,
-  "width": 640,
-  "height": 480,
-  "size": 15360
-}
-```
-
-### 视频帧二进制数据（设备→服务器）
-
-**BinaryProtocol2 格式：**
-```
-Header (16 bytes):
-  - version: 0x0002
-  - type: 0x0002 (TYPE_VIDEO)
-  - reserved: 0x00000000
-  - timestamp: uint32_t
-  - payload_size: uint32_t
-
-Payload:
-  - JPEG encoded image data
-```
-
----
-
-## API 参考
-
-### Application 类
-
-```cpp
 // 启动监控模式
-bool StartMonitorMode();
+{"type": "system", "command": "start_monitor"}
 
 // 停止监控模式
-void StopMonitorMode();
-
-// 检查是否处于监控模式
-bool IsMonitorMode() const;
+{"type": "system", "command": "stop_monitor"}
 ```
 
-### VideoStreamService 类
+### 锁控命令
 
-```cpp
-// 启动视频流服务
-bool Start(Camera* camera, int fps = 10);
+```json
+// 远程开锁
+{"type": "lock_control", "command": "unlock"}
 
-// 停止视频流服务
-void Stop();
+// 设置临时密码
+{"type": "lock_control", "command": "temp_code", "code": "123456"}
 
-// 获取下一帧
-std::unique_ptr<JpegFrame> GetNextFrame();
+// 开启警报
+{"type": "lock_control", "command": "alarm_on", "level": 1}
 
-// 检查是否运行中
-bool IsRunning() const;
-
-// 获取队列大小
-size_t GetQueueSize() const;
+// 关闭警报
+{"type": "lock_control", "command": "alarm_off"}
 ```
 
-### MonitorService 类
+### 人脸识别结果
 
-```cpp
-// 启动监控服务
-bool Start(Protocol* protocol, Camera* camera, AudioService* audio_service);
+```json
+// 识别成功且有权限
+{"type": "face_recognition", "result": "known", "access": {"granted": true}}
 
-// 停止监控服务
-void Stop();
+// 识别成功但无权限
+{"type": "face_recognition", "result": "known", "access": {"granted": false}}
 
-// 检查是否运行中
-bool IsRunning() const;
+// 未识别（陌生人）
+{"type": "face_recognition", "result": "unknown", "access": {"granted": false}}
 
-// 设置状态变化回调
-void SetStateChangeCallback(std::function<void(bool)> callback);
+// 无人脸
+{"type": "face_recognition", "result": "no_face"}
 ```
 
-### Esp32Camera 类
+---
+
+## UART 协议速查
+
+### 协议格式（7字节）
+
+```
+[0xAA][CAT][TYPE][DATA0][DATA1][DATA2][CHECKSUM]
+校验和 = (CAT + TYPE + DATA0 + DATA1 + DATA2) & 0xFF
+```
+
+### 消息类别
+
+| CAT | 名称 | 方向 |
+|-----|------|------|
+| 0x01 | EVENT | STM32 → ESP32 |
+| 0x02 | CONTROL | ESP32 → STM32 |
+| 0x0F | ACK | 双向 |
+
+### 常用事件（CAT=0x01）
+
+| TYPE | 事件 | 处理 |
+|------|------|------|
+| 0x01 | 门铃按下 | 触发人脸识别 |
+| 0x02 | 人体检测 | 触发人脸识别 |
+| 0x03 | 暴力破坏 | 警报+上报 |
+
+### 常用命令（CAT=0x02）
+
+| TYPE | 命令 | 数据 |
+|------|------|------|
+| 0x01 | 开锁 | 无 |
+| 0x02 | 开警报 | DATA0=级别 |
+| 0x03 | 关警报 | 无 |
+| 0x04 | 设密码 | BCD编码 |
+
+### UART 配置
+
+```
+波特率: 9600, 数据位: 8, 停止位: 1, 校验: 无
+TX: GPIO_NUM_3, RX: GPIO_NUM_14
+```
+
+---
+
+## API 速查
+
+### Application
 
 ```cpp
-// 捕获 JPEG 图像
-bool CaptureJpeg(uint8_t** jpeg_data, size_t* jpeg_size, int quality = 80);
+bool StartMonitorMode();      // 启动监控模式
+void StopMonitorMode();       // 停止监控模式
+bool IsMonitorMode() const;   // 检查监控模式
+```
 
-// 检查摄像头是否可用
+### LockControlService
+
+```cpp
+bool SendUnlock();                              // 开锁
+bool SendAlarm(uint8_t level);                  // 开警报
+bool SendAlarmOff();                            // 关警报
+bool SendTempCode(const char* password);        // 设临时密码
+void SetEventCallback(EventCallback callback);  // 设事件回调
+```
+
+### Esp32Camera
+
+```cpp
+bool CaptureJpeg(uint8_t** data, size_t* size, int quality = 80);
 bool IsAvailable() const;
-
-// 获取帧宽度
 uint16_t GetFrameWidth() const;
-
-// 获取帧高度
 uint16_t GetFrameHeight() const;
 ```
 
 ---
 
-## 配置参数
+## BinaryProtocol2 协议
 
-### 视频流配置
+### 协议结构
 
-```cpp
-// 默认帧率
-static constexpr int kDefaultFps = 10;
-
-// 默认 JPEG 质量
-static constexpr int kDefaultQuality = 60;
-
-// 最大队列大小
-static constexpr size_t kMaxQueueSize = 3;
+```c
+struct BinaryProtocol2 {
+    uint16_t version;      // = 2
+    uint16_t type;         // 消息类型
+    uint32_t reserved;     // 扩展字段
+    uint32_t timestamp;    // 毫秒
+    uint32_t payload_size; // 字节
+    uint8_t payload[];
+};
 ```
 
-### 性能参数
+### 消息类型区分
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| 分辨率 | 640x480 | VGA |
-| 帧率 | 10 fps | 可配置 |
-| JPEG 质量 | 60 | 1-100 |
-| 队列大小 | 3 帧 | 固定 |
+| type | reserved | 数据类型 |
+|------|----------|----------|
+| 0 | 0 | 音频（OPUS） |
+| 0 | 非0 | 监控视频流（JPEG） |
+| 2 | 非0 | 人脸识别图像（JPEG） |
+
+**视频 reserved 编码：** `(width << 16) | height`
+
+---
+
+## 性能指标
+
+| 指标 | 目标值 |
+|------|--------|
+| 视频分辨率 | 640x480 |
+| 视频帧率 | 10 fps |
+| JPEG 质量 | 60-80 |
+| 视频带宽 | ~1.2 Mbps |
+| 端到端延迟 | <500ms |
 
 ---
 
 ## 故障排查
 
-### 问题：摄像头初始化失败
+### 编译失败
 
-**检查：**
 ```bash
-# 查看日志
-idf.py monitor | grep "Esp32Camera"
-```
-
-**可能原因：**
-- 摄像头硬件未连接
-- 引脚配置错误
-- 电源不足
-
-### 问题：视频流无输出
-
-**检查：**
-```bash
-# 查看 VideoStreamService 日志
-idf.py monitor | grep "VideoStreamService"
-```
-
-**可能原因：**
-- 摄像头未初始化
-- 服务未启动
-- 队列已满
-
-### 问题：编译错误
-
-**检查：**
-```bash
-# 清理并重新编译
 idf.py fullclean
 idf.py build
 ```
 
----
-
-## 性能监控
-
-### 查看内存使用
-
-```cpp
-// 在代码中添加
-SystemInfo::PrintHeapStats();
-```
-
-### 查看任务状态
-
-```cpp
-// 在代码中添加
-SystemInfo::PrintTaskList();
-SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
-```
-
-### 日志级别
+### 摄像头问题
 
 ```bash
-# 设置日志级别
-idf.py menuconfig
-# Component config → Log output → Default log verbosity
+idf.py monitor | grep "Esp32Camera"
 ```
+
+### 视频流问题
+
+```bash
+idf.py monitor | grep "VideoStreamService"
+```
+
+### UART 通信问题
+
+```bash
+idf.py monitor | grep "LockControl"
+```
+
+---
+
+## 日志标签
+
+| 标签 | 模块 |
+|------|------|
+| `Application` | 应用主控 |
+| `LockControl` | 锁控服务 |
+| `LockProtocol` | UART 协议 |
+| `VideoStreamService` | 视频流 |
+| `MonitorService` | 监控服务 |
+| `Esp32Camera` | 摄像头 |
 
 ---
 
@@ -255,16 +217,6 @@ idf.py menuconfig
 
 | 文档 | 说明 |
 |------|------|
-| `implementation_plan.md` | 详细实施计划 |
-| `implementation_status.md` | 实施状态检查 |
-| `server_side_requirements.md` | 服务器端需求 |
-| `implementation_summary.md` | 实施总结 |
-| `quick_reference.md` | 本文档 |
-
----
-
-## 联系和支持
-
-**项目仓库：** xiaozhi-esp32  
-**相关文档：** `docs/my_docs/`  
-**日志标签：** `VideoStreamService`, `MonitorService`, `Esp32Camera`
+| `face_recognition_handover.md` | 主交接文档 |
+| `server_protocol.md` | 服务器端协议规范 |
+| `.kiro/specs/face-recognition/` | 规范文档（权威） |

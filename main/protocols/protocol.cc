@@ -1,8 +1,22 @@
+/**
+ * @file protocol.cc
+ * @brief 通信协议抽象基类实现
+ * 
+ * 提供 Protocol 基类的默认实现，包括：
+ * - 回调函数注册
+ * - 通用消息发送方法
+ * - v5.0 协议扩展方法的默认实现（子类需覆盖）
+ */
+
 #include "protocol.h"
 
 #include <esp_log.h>
 
 #define TAG "Protocol"
+
+// ============================================================================
+// 回调注册
+// ============================================================================
 
 void Protocol::OnIncomingJson(std::function<void(const cJSON* root)> callback) {
     on_incoming_json_ = callback;
@@ -32,12 +46,20 @@ void Protocol::OnDisconnected(std::function<void()> callback) {
     on_disconnected_ = callback;
 }
 
+// ============================================================================
+// 错误处理
+// ============================================================================
+
 void Protocol::SetError(const std::string& message) {
     error_occurred_ = true;
     if (on_network_error_ != nullptr) {
         on_network_error_(message);
     }
 }
+
+// ============================================================================
+// 语音交互消息
+// ============================================================================
 
 void Protocol::SendAbortSpeaking(AbortReason reason) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"abort\"";
@@ -78,6 +100,10 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+// ============================================================================
+// 超时检测
+// ============================================================================
+
 bool Protocol::IsTimeout() const {
     const int kTimeoutSeconds = 120;
     auto now = std::chrono::steady_clock::now();
@@ -87,4 +113,33 @@ bool Protocol::IsTimeout() const {
         ESP_LOGE(TAG, "Channel timeout %ld seconds", (long)duration.count());
     }
     return timeout;
+}
+
+// ============================================================================
+// v5.0 协议扩展方法默认实现
+// ============================================================================
+
+void Protocol::SendAck(const std::string& msg_id, int code, const std::string& msg) {
+    ESP_LOGW(TAG, "SendAck not implemented in base class");
+}
+
+void Protocol::SendStatusReport(int battery, int lux, int lock_state, int light_state) {
+    ESP_LOGW(TAG, "SendStatusReport not implemented in base class");
+}
+
+void Protocol::SendEventReport(const std::string& event, int param) {
+    ESP_LOGW(TAG, "SendEventReport not implemented in base class");
+}
+
+void Protocol::SendLogReport(const std::string& method, int uid, bool result, int fail_count) {
+    ESP_LOGW(TAG, "SendLogReport not implemented in base class");
+}
+
+void Protocol::SendHeartbeat() {
+    ESP_LOGW(TAG, "SendHeartbeat not implemented in base class");
+}
+
+void Protocol::SendUserMgmtResult(const std::string& category, const std::string& command,
+                                  bool result, int val, const std::string& msg) {
+    ESP_LOGW(TAG, "SendUserMgmtResult not implemented in base class");
 }

@@ -1,5 +1,10 @@
-#include "lock_control.h"
+/**
+ * @file lock_control.cc
+ * @brief 锁控服务类实现
+ * @version 2.0
+ */
 
+#include "lock_control.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
 
@@ -7,65 +12,76 @@ static const char* TAG = "LockControl";
 
 namespace xiaozhi {
 
+// ============================================================================
+// 构造与析构
+// ============================================================================
+
 LockControlService::LockControlService()
-    : uart_port_(UART_NUM_0), running_(false), rx_task_handle_(nullptr), event_callback_(nullptr) {}
+    : uart_port_(UART_NUM_0),
+      running_(false),
+      rx_task_handle_(nullptr),
+      event_callback_(nullptr) {
+}
 
 LockControlService::~LockControlService() {
   Stop();
 }
 
+// ============================================================================
+// 生命周期管理
+// ============================================================================
+
 bool LockControlService::Start(uart_port_t port, int tx_pin, int rx_pin) {
   if (running_) {
-    ESP_LOGW(TAG, "Service already running");
+    ESP_LOGW(TAG, "服务已在运行");
     return true;
   }
 
   uart_port_ = port;
 
-  // Configure UART parameters
+  // 配置 UART 参数：9600 波特率，8N1
   uart_config_t uart_config = {
       .baud_rate = 9600,
       .data_bits = UART_DATA_8_BITS,
       .parity = UART_PARITY_DISABLE,
       .stop_bits = UART_STOP_BITS_1,
       .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-      .rx_flow_ctrl_thresh = 0,
       .source_clk = UART_SCLK_DEFAULT,
   };
 
-  // Configure UART
-  esp_err_t err = uart_param_config(uart_port_, &uart_config);
+  // 安装 UART 驱动
+  esp_err_t err = uart_driver_install(uart_port_, 256, 256, 0, NULL, 0);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to configure UART: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "安装 UART 驱动失败: %s", esp_err_to_name(err));
     return false;
   }
 
-  // Set UART pins
+  // 配置 UART 参数
+  err = uart_param_config(uart_port_, &uart_config);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "配置 UART 失败: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  // 设置 UART 引脚
   err = uart_set_pin(uart_port_, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to set UART pins: %s", esp_err_to_name(err));
-    return false;
-  }
-
-  // Install UART driver (RX buffer = 256, TX buffer = 256)
-  err = uart_driver_install(uart_port_, 256, 256, 0, nullptr, 0);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(err));
+    ESP_LOGE(TAG, "设置 UART 引脚失败: %s", esp_err_to_name(err));
     return false;
   }
 
   running_ = true;
 
-  // Create RX task
+  // 创建接收任务
   BaseType_t result = xTaskCreate(RxTask, "lock_rx", 2048, this, 5, &rx_task_handle_);
   if (result != pdPASS) {
-    ESP_LOGE(TAG, "Failed to create RX task");
+    ESP_LOGE(TAG, "创建接收任务失败");
     uart_driver_delete(uart_port_);
     running_ = false;
     return false;
   }
 
-  ESP_LOGI(TAG, "UART initialized on port %d (TX=%d, RX=%d)", uart_port_, tx_pin, rx_pin);
+  ESP_LOGI(TAG, "UART 初始化完成，端口 %d (TX=%d, RX=%d)", uart_port_, tx_pin, rx_pin);
   return true;
 }
 
@@ -76,22 +92,24 @@ void LockControlService::Stop() {
 
   running_ = false;
 
-  // Wait for RX task to finish
+  // 等待接收任务退出
   if (rx_task_handle_ != nullptr) {
-    // Give task time to exit
     vTaskDelay(pdMS_TO_TICKS(100));
     rx_task_handle_ = nullptr;
   }
 
-  // Uninstall UART driver
+  // 删除 UART 驱动
   uart_driver_delete(uart_port_);
-
-  ESP_LOGI(TAG, "Service stopped");
+  ESP_LOGI(TAG, "服务已停止");
 }
 
 void LockControlService::SetEventCallback(EventCallback callback) {
   event_callback_ = callback;
 }
+
+// ============================================================================
+// 接收任务
+// ============================================================================
 
 void LockControlService::RxTask(void* param) {
   LockControlService* service = static_cast<LockControlService*>(param);
@@ -99,26 +117,31 @@ void LockControlService::RxTask(void* param) {
   vTaskDelete(nullptr);
 }
 
+/**
+ * @brief 接收循环
+ * 
+ * 从 UART 读取数据，按协议格式解析消息。
+ * 使用状态机方式处理：先找帧头，再接收完整帧，最后校验解析。
+ */
 void LockControlService::RxLoop() {
-  ESP_LOGI(TAG, "RX task started");
+  ESP_LOGI(TAG, "接收任务已启动");
   
   uint8_t buffer[LOCK_PROTOCOL_LENGTH];
   size_t pos = 0;
   bool found_header = false;
   int64_t last_byte_time = 0;
-  const int64_t TIMEOUT_MS = 1000; // 1 second timeout
+  const int64_t TIMEOUT_MS = 1000;  // 接收超时时间
   
   while (running_) {
     uint8_t byte;
     int len = uart_read_bytes(uart_port_, &byte, 1, pdMS_TO_TICKS(100));
     
     if (len <= 0) {
-      // Check for timeout if we're in the middle of receiving a message
+      // 检查接收超时
       if (found_header && pos > 0) {
-        int64_t now = esp_timer_get_time() / 1000; // Convert to ms
+        int64_t now = esp_timer_get_time() / 1000;
         if (now - last_byte_time > TIMEOUT_MS) {
-          ESP_LOGE(TAG, "RX buffer overflow: timeout waiting for complete message (pos=%zu)", pos);
-          // Discard incomplete message and resynchronize
+          ESP_LOGW(TAG, "接收超时，丢弃不完整消息 (pos=%zu)", pos);
           pos = 0;
           found_header = false;
         }
@@ -128,7 +151,7 @@ void LockControlService::RxLoop() {
     
     last_byte_time = esp_timer_get_time() / 1000;
     
-    // Look for header byte
+    // 查找帧头
     if (!found_header) {
       if (byte == LOCK_PROTOCOL_HEADER) {
         buffer[0] = byte;
@@ -138,144 +161,234 @@ void LockControlService::RxLoop() {
       continue;
     }
     
-    // Check for buffer overflow
+    // 缓冲区溢出保护
     if (pos >= LOCK_PROTOCOL_LENGTH) {
-      ESP_LOGE(TAG, "RX buffer overflow: pos=%zu", pos);
-      // Discard and resynchronize
+      ESP_LOGE(TAG, "缓冲区溢出: pos=%zu", pos);
       pos = 0;
       found_header = false;
       continue;
     }
     
-    // Collect message bytes
     buffer[pos++] = byte;
     
-    // Check if we have a complete message
+    // 接收完整帧，进行解析
     if (pos >= LOCK_PROTOCOL_LENGTH) {
-      // Parse message
       LockMessage msg = LockProtocol::ParseMessage(buffer, LOCK_PROTOCOL_LENGTH);
       
       if (msg.valid) {
-        ESP_LOGD(TAG, "Received valid message: CAT=0x%02X, TYPE=0x%02X", msg.category, msg.type);
+        ESP_LOGI(TAG, "收到消息: CAT=0x%02X, TYPE=0x%02X, D=[0x%02X,0x%02X,0x%02X]",
+                 msg.category, msg.type, msg.data[0], msg.data[1], msg.data[2]);
         
-        // Send ACK for non-ACK messages
-        if (!msg.IsAck()) {
-          SendAck(msg.category, msg.type, true);
-        }
+        // 注意：新协议中 ESP32 不需要回复 ACK
+        // STM32 的 CAT_RPT 上报不需要 ACK
+        // 只有 STM32 收到 ESP32 的 CAT_CMD/CAT_USER 才需要回复 ACK
         
-        // Invoke callback if set
+        // 触发事件回调
         if (event_callback_) {
           event_callback_(msg);
         }
       } else {
-        ESP_LOGE(TAG, "Received invalid message (checksum mismatch)");
+        ESP_LOGE(TAG, "收到无效消息（校验和错误）");
       }
       
-      // Reset for next message
+      // 重置状态，准备接收下一帧
       pos = 0;
       found_header = false;
     }
   }
   
-  ESP_LOGI(TAG, "RX task stopped");
+  ESP_LOGI(TAG, "接收任务已停止");
 }
 
+// ============================================================================
+// 消息发送
+// ============================================================================
+
+/**
+ * @brief 发送消息到 STM32
+ * 
+ * 带重试机制，最多重试 3 次。
+ */
 bool LockControlService::SendMessage(uint8_t cat, uint8_t type, const std::array<uint8_t, 3>& data) {
   if (!running_) {
-    ESP_LOGW(TAG, "Cannot send message: service not running");
+    ESP_LOGW(TAG, "无法发送消息：服务未运行");
     return false;
   }
   
-  // Build message
   std::vector<uint8_t> msg = LockProtocol::BuildMessage(cat, type, data);
   
-  // Retry up to 3 times
   const int MAX_RETRIES = 3;
   for (int retry = 0; retry < MAX_RETRIES; retry++) {
-    // Send via UART
     int len = uart_write_bytes(uart_port_, msg.data(), msg.size());
     
-    if (len == msg.size()) {
-      ESP_LOGD(TAG, "Sent message: CAT=0x%02X, TYPE=0x%02X, DATA=[0x%02X, 0x%02X, 0x%02X]",
+    if (len == static_cast<int>(msg.size())) {
+      ESP_LOGD(TAG, "发送消息: CAT=0x%02X, TYPE=0x%02X, D=[0x%02X,0x%02X,0x%02X]",
                cat, type, data[0], data[1], data[2]);
       return true;
     }
     
-    // Failed, retry after delay
     if (retry < MAX_RETRIES - 1) {
-      ESP_LOGW(TAG, "Failed to send message (attempt %d/%d), retrying...", retry + 1, MAX_RETRIES);
+      ESP_LOGW(TAG, "发送失败 (尝试 %d/%d)，重试中...", retry + 1, MAX_RETRIES);
       vTaskDelay(pdMS_TO_TICKS(10));
     }
   }
   
-  ESP_LOGE(TAG, "Failed to send message after %d attempts: CAT=0x%02X, TYPE=0x%02X", 
-           MAX_RETRIES, cat, type);
+  ESP_LOGE(TAG, "发送消息失败: CAT=0x%02X, TYPE=0x%02X", cat, type);
   return false;
 }
 
-bool LockControlService::SendUnlock() {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::CONTROL),
-                     static_cast<uint8_t>(ControlType::UNLOCK),
-                     {0, 0, 0});
+// ============================================================================
+// 控制命令实现
+// ============================================================================
+
+bool LockControlService::SendLock(LockMode mode, uint8_t hold_seconds) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::CMD_LOCK),
+                     {static_cast<uint8_t>(mode), hold_seconds, 0x00});
 }
 
-bool LockControlService::SendAlarm(uint8_t level) {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::CONTROL),
-                     static_cast<uint8_t>(ControlType::ALARM_ON),
-                     {level, 0, 0});
+bool LockControlService::SendUnlock(uint8_t hold_seconds) {
+  return SendLock(LockMode::UNLOCK, hold_seconds);
 }
 
-bool LockControlService::SendAlarmOff() {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::CONTROL),
-                     static_cast<uint8_t>(ControlType::ALARM_OFF),
-                     {0, 0, 0});
+bool LockControlService::SendLockDoor() {
+  return SendLock(LockMode::LOCK, 0);
 }
 
-bool LockControlService::SendTempCode(const char* password) {
-  // Encode password using BCD format
-  std::array<uint8_t, 3> encoded = LockProtocol::EncodePassword(password);
-  
-  // Check if encoding was successful (all zeros indicates error)
-  if (encoded[0] == 0 && encoded[1] == 0 && encoded[2] == 0) {
-    ESP_LOGE(TAG, "Failed to encode password: invalid format");
+bool LockControlService::SendOledIcon(OledIcon icon) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::CMD_OLED),
+                     {static_cast<uint8_t>(icon), 0x00, 0x00});
+}
+
+bool LockControlService::SendBeep(uint8_t count, BeepFreq freq) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::CMD_BEEP),
+                     {count, static_cast<uint8_t>(freq), 0x00});
+}
+
+bool LockControlService::SendSyncTime(uint8_t hour, uint8_t minute, uint8_t second) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::CMD_SYNC_T),
+                     {hour, minute, second});
+}
+
+bool LockControlService::SendLight(LightMode mode) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::CMD_LIGHT),
+                     {static_cast<uint8_t>(mode), 0x00, 0x00});
+}
+
+bool LockControlService::SendLightOn() {
+  return SendLight(LightMode::LIGHT_ON);
+}
+
+bool LockControlService::SendLightOff() {
+  return SendLight(LightMode::LIGHT_OFF);
+}
+
+bool LockControlService::SendLightAuto() {
+  return SendLight(LightMode::LIGHT_AUTO);
+}
+
+bool LockControlService::QuerySensors() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::Q_SENSORS),
+                     {0x00, 0x00, 0x00});
+}
+
+bool LockControlService::QueryStatus() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::CMD),
+                     static_cast<uint8_t>(CmdType::Q_STATUS),
+                     {0x00, 0x00, 0x00});
+}
+
+// ============================================================================
+// 用户管理 - 指纹
+// ============================================================================
+
+bool LockControlService::FingerprintEnroll(uint8_t expected_id) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserFpCmd::FP_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_ENROLL), expected_id, 0x00});
+}
+
+bool LockControlService::FingerprintDelete(uint8_t id) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserFpCmd::FP_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_DELETE), id, 0x00});
+}
+
+bool LockControlService::FingerprintClear() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserFpCmd::FP_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_CLEAR), 0x00, 0x00});
+}
+
+bool LockControlService::FingerprintQueryCount() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserFpCmd::FP_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_COUNT), 0x00, 0x00});
+}
+
+// ============================================================================
+// 用户管理 - NFC
+// ============================================================================
+
+bool LockControlService::NfcEnroll() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_ENROLL), 0x00, 0x00});
+}
+
+bool LockControlService::NfcDelete(uint8_t id) {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_DELETE), id, 0x00});
+}
+
+bool LockControlService::NfcClear() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_CLEAR), 0x00, 0x00});
+}
+
+bool LockControlService::NfcQueryCount() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
+                     {static_cast<uint8_t>(FpSubCmd::FP_COUNT), 0x00, 0x00});
+}
+
+// ============================================================================
+// 用户管理 - 密码
+// ============================================================================
+
+bool LockControlService::SetPassword(uint32_t password) {
+  if (password > 999999) {
+    ESP_LOGE(TAG, "密码超出范围（最大 999999）");
     return false;
   }
   
-  return SendMessage(static_cast<uint8_t>(MsgCategory::CONTROL),
-                     static_cast<uint8_t>(ControlType::SET_TEMP_CODE),
+  std::array<uint8_t, 3> encoded = LockProtocol::EncodePasswordHex(password);
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserPwdCmd::PWD_SET),
                      encoded);
 }
 
-bool LockControlService::SendLedControl(uint8_t mode, uint8_t color, uint8_t brightness) {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::CONTROL),
-                     static_cast<uint8_t>(ControlType::LED_CTRL),
-                     {mode, color, brightness});
+bool LockControlService::QueryPassword() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                     static_cast<uint8_t>(UserPwdCmd::PWD_QUERY),
+                     {0x00, 0x00, 0x00});
 }
 
-bool LockControlService::QueryLockState() {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::QUERY), 0x01, {0, 0, 0});
-}
+// ============================================================================
+// 心跳
+// ============================================================================
 
-bool LockControlService::QueryDoorState() {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::QUERY), 0x02, {0, 0, 0});
-}
-
-bool LockControlService::QueryBattery() {
-  return SendMessage(static_cast<uint8_t>(MsgCategory::QUERY), 0x03, {0, 0, 0});
-}
-
-bool LockControlService::SendAck(uint8_t orig_cat, uint8_t orig_type, bool success) {
-  std::vector<uint8_t> ack_msg = LockProtocol::BuildAck(orig_cat, orig_type, success);
-  
-  int len = uart_write_bytes(uart_port_, ack_msg.data(), ack_msg.size());
-  
-  if (len != ack_msg.size()) {
-    ESP_LOGE(TAG, "Failed to send ACK");
-    return false;
-  }
-  
-  ESP_LOGD(TAG, "Sent ACK for CAT=0x%02X, TYPE=0x%02X, success=%d", orig_cat, orig_type, success);
-  return true;
+bool LockControlService::SendPing() {
+  return SendMessage(static_cast<uint8_t>(MsgCategory::SYS),
+                     static_cast<uint8_t>(SysType::SYS_PING),
+                     {0x00, 0x00, 0x00});
 }
 
 }  // namespace xiaozhi
