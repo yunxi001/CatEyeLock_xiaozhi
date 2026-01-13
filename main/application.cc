@@ -1154,9 +1154,18 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage& msg) {
             uint16_t lux = (msg.data[1] << 8) | msg.data[2];
             ESP_LOGI(TAG, "环境数据: 电量=%d%%, 光照=%d Lux", battery, lux);
             
-            // 保存环境数据，用于状态上报
+            // 检查是否有变化
+            bool env_changed = (battery != last_battery_) || (lux != last_lux_);
+            
+            // 保存环境数据
             last_battery_ = battery;
             last_lux_ = lux;
+            
+            // v5.0 协议：环境数据变化时上报状态到服务器
+            if (env_changed && protocol_ && protocol_->IsAudioChannelOpened()) {
+                protocol_->SendStatusReport(last_battery_, last_lux_, 
+                                            last_lock_state_, last_light_state_);
+            }
             break;
         }
         
@@ -1304,6 +1313,15 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage& msg) {
  * @brief 获取开锁方式字符串
  * @param method 开锁方式枚举值
  * @return 开锁方式字符串（用于服务器上报）
+ * 
+ * 与协议 v5.0 对应：
+ * - finger: 指纹开锁
+ * - nfc: NFC 开锁
+ * - pwd: 密码开锁
+ * - remote: 远程开锁(App)
+ * - key: 机械钥匙
+ * - face: 人脸开锁
+ * - temp_pwd: 临时密码开锁
  */
 std::string Application::GetUnlockMethodString(uint8_t method) {
     switch (method) {
@@ -1317,6 +1335,10 @@ std::string Application::GetUnlockMethodString(uint8_t method) {
             return "remote";
         case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_KEY):
             return "key";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_TEMP_PWD):
+            return "temp_pwd";
+        case static_cast<uint8_t>(xiaozhi::UnlockMethod::UNLOCK_FACE):
+            return "face";
         default:
             return "unknown";
     }
@@ -1619,13 +1641,16 @@ bool Application::HandleSmartLockJsonMessage(const cJSON* root, const char* type
                         // 关锁命令
                         lock_control_->SendLockDoor();
                     } else if (cmd == "temp_code") {
-                        // 设置临时密码
+                        // 设置临时密码（分两包发送给 STM32）
                         auto code = cJSON_GetObjectItem(root_copy, "code");
+                        auto expires = cJSON_GetObjectItem(root_copy, "expires");
                         if (cJSON_IsString(code)) {
                             uint32_t pwd = atoi(code->valuestring);
-                            lock_control_->SetPassword(pwd);
+                            uint32_t exp_seconds = cJSON_IsNumber(expires) ? expires->valueint : 3600;
+                            lock_control_->SetTempPassword(pwd, exp_seconds);
                         }
-                    } else {
+                    }
+                    else {
                         ack_code = 2;  // 参数错误
                         ack_msg = "Unknown command";
                     }

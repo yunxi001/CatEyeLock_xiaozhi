@@ -311,6 +311,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
                 } else {
+                    // v5.0 协议：msg_id 防重放检查
+                    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+                    if (cJSON_IsString(msg_id)) {
+                        std::string msg_id_str = msg_id->valuestring;
+                        if (IsDuplicateMsgId(msg_id_str)) {
+                            ESP_LOGW(TAG, "重复的 msg_id，忽略消息: %s", msg_id_str.c_str());
+                            cJSON_Delete(root);
+                            return;
+                        }
+                        // 添加到缓存
+                        AddMsgIdToCache(msg_id_str);
+                    }
+                    
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
                     }

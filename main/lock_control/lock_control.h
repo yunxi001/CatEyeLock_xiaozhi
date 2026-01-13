@@ -194,17 +194,28 @@ class LockControlService {
   // =========================================================================
   
   /**
-   * @brief 设置开锁密码
+   * @brief 设置全局开锁密码
    * @param password 6 位数字密码（0 ~ 999999）
    */
   bool SetPassword(uint32_t password);
   
   /**
-   * @brief 查询当前密码
+   * @brief 查询当前全局密码
    * 
    * STM32 将回复 RPT_PWD 消息。
    */
   bool QueryPassword();
+  
+  /**
+   * @brief 设置临时密码
+   * 
+   * 分两包发送：第1包密码值，第2包有效期。
+   * STM32 收到两包后启动倒计时，到期自动清除。
+   * 
+   * @param password 6 位数字密码（0 ~ 999999）
+   * @param expires  有效期（秒），最大 16777215
+   */
+  bool SetTempPassword(uint32_t password, uint32_t expires);
 
   // =========================================================================
   // 心跳 (CAT = 0x00, TYPE = 0xF0)

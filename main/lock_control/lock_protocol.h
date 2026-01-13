@@ -82,7 +82,7 @@ enum class AckError : uint8_t {
   ERR_FP_FULL   = 0x04,  ///< 指纹库已满
   ERR_NFC_FULL  = 0x05,  ///< NFC 库已满
   ERR_HARDWARE  = 0x06,  ///< 硬件错误
-  ERR_TIMEOUT   = 0x07,  ///< 操作超时
+  ERR_TIMEOUT   = 0xFF,  ///< 操作超时
 };
 
 // ============================================================================
@@ -168,13 +168,24 @@ enum class EventId : uint8_t {
 
 /**
  * @brief 开锁方式
+ * 
+ * 与服务器协议 v5.0 对应的 method 字段：
+ * - finger: 指纹开锁
+ * - nfc: NFC 开锁
+ * - pwd: 密码开锁
+ * - remote: 远程开锁(App)
+ * - key: 机械钥匙
+ * - temp_pwd: 临时密码开锁
+ * - face: 人脸开锁
  */
 enum class UnlockMethod : uint8_t {
-  UNLOCK_FINGERPRINT = 0x01,  ///< 指纹开锁
-  UNLOCK_NFC         = 0x02,  ///< NFC 开锁
-  UNLOCK_PASSWORD    = 0x03,  ///< 密码开锁
-  UNLOCK_REMOTE      = 0x04,  ///< 远程开锁
-  UNLOCK_KEY         = 0x05,  ///< 钥匙开锁
+  UNLOCK_FINGERPRINT = 0x01,  ///< 指纹开锁 (finger)
+  UNLOCK_NFC         = 0x02,  ///< NFC 开锁 (nfc)
+  UNLOCK_PASSWORD    = 0x03,  ///< 密码开锁 (pwd)
+  UNLOCK_REMOTE      = 0x04,  ///< 远程开锁 (remote)
+  UNLOCK_KEY         = 0x05,  ///< 钥匙开锁 (key)
+  UNLOCK_TEMP_PWD    = 0x06,  ///< 临时密码开锁 (temp_pwd)
+  UNLOCK_FACE        = 0x07,  ///< 人脸开锁 (face)
 };
 
 // ============================================================================
@@ -201,8 +212,10 @@ enum class UserNfcCmd : uint8_t {
  * @brief 密码管理命令
  */
 enum class UserPwdCmd : uint8_t {
-  PWD_SET   = 0x30,  ///< 设置密码
-  PWD_QUERY = 0x31,  ///< 查询密码
+  PWD_SET       = 0x30,  ///< 设置全局密码
+  PWD_QUERY     = 0x31,  ///< 查询全局密码
+  TEMP_PWD_SET  = 0x32,  ///< 设置临时密码（第1包：密码）
+  TEMP_PWD_EXP  = 0x33,  ///< 设置临时密码（第2包：有效期秒数）
 };
 
 /**

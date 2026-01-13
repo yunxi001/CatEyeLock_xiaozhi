@@ -381,6 +381,49 @@ bool LockControlService::QueryPassword() {
                      {0x00, 0x00, 0x00});
 }
 
+bool LockControlService::SetTempPassword(uint32_t password, uint32_t expires) {
+  if (password > 999999) {
+    ESP_LOGE(TAG, "临时密码超出范围（最大 999999）");
+    return false;
+  }
+  
+  if (expires > 16777215) {
+    ESP_LOGE(TAG, "有效期超出范围（最大 16777215 秒）");
+    return false;
+  }
+  
+  // 第1包：发送密码
+  std::array<uint8_t, 3> pwd_encoded = LockProtocol::EncodePasswordHex(password);
+  bool ok = SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                        static_cast<uint8_t>(UserPwdCmd::TEMP_PWD_SET),
+                        pwd_encoded);
+  if (!ok) {
+    ESP_LOGE(TAG, "发送临时密码失败");
+    return false;
+  }
+  
+  // 短暂延时，确保 STM32 处理完第1包
+  vTaskDelay(pdMS_TO_TICKS(50));
+  
+  // 第2包：发送有效期（3 字节大端）
+  std::array<uint8_t, 3> exp_encoded = {
+      static_cast<uint8_t>((expires >> 16) & 0xFF),
+      static_cast<uint8_t>((expires >> 8) & 0xFF),
+      static_cast<uint8_t>(expires & 0xFF)
+  };
+  ok = SendMessage(static_cast<uint8_t>(MsgCategory::USER),
+                   static_cast<uint8_t>(UserPwdCmd::TEMP_PWD_EXP),
+                   exp_encoded);
+  if (!ok) {
+    ESP_LOGE(TAG, "发送临时密码有效期失败");
+    return false;
+  }
+  
+  ESP_LOGI(TAG, "临时密码已设置: %06lu, 有效期: %lu 秒", 
+           (unsigned long)password, (unsigned long)expires);
+  return true;
+}
+
 // ============================================================================
 // 心跳
 // ============================================================================

@@ -837,3 +837,449 @@
 1. 补充 `.cc` 文件中已实现但 `.h` 文件中缺失的方法声明
 2. 添加 Doxygen 风格文档注释，与项目其他模块保持一致
 3. 使用区域分隔符提高代码可读性
+
+
+---
+
+## 2025-12-11 (msg_id 防重放检查)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/protocols/websocket_protocol.cc` | 在 JSON 消息处理中添加 msg_id 防重放检查 |
+
+### 具体变更
+
+**新增 msg_id 防重放检查逻辑**
+- 位置: `OnData` 回调函数，JSON 消息处理分支（非 hello 消息），第 314-326 行
+- 变更: 在调用 `on_incoming_json_` 回调前，新增 msg_id 重复检查
+- 逻辑:
+  1. 检查 JSON 消息是否包含 `msg_id` 字段
+  2. 如果 msg_id 已存在于缓存中，记录警告日志并丢弃该消息
+  3. 如果是新的 msg_id，将其添加到缓存中
+  4. 只有通过检查的消息才会传递给 `on_incoming_json_` 回调
+
+**新增代码片段**
+```cpp
+// v5.0 协议：msg_id 防重放检查
+auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+if (cJSON_IsString(msg_id)) {
+    std::string msg_id_str = msg_id->valuestring;
+    if (IsDuplicateMsgId(msg_id_str)) {
+        ESP_LOGW(TAG, "重复的 msg_id，忽略消息: %s", msg_id_str.c_str());
+        cJSON_Delete(root);
+        return;
+    }
+    // 添加到缓存
+    AddMsgIdToCache(msg_id_str);
+}
+```
+
+### 功能说明
+
+实现 v5.0 通信协议规范中的 msg_id 防重放机制：
+- 服务器下发的关键指令携带唯一 `msg_id`
+- ESP32 维护最近 100 条 msg_id 缓存（FIFO 淘汰策略）
+- 重复的 msg_id 消息直接丢弃，防止指令被重复执行
+- 符合协议规范第 7.1 节"防重放攻击"安全要求
+
+### 相关代码
+
+| 方法 | 位置 | 说明 |
+|------|------|------|
+| `IsDuplicateMsgId()` | websocket_protocol.cc | 检查 msg_id 是否在缓存中 |
+| `AddMsgIdToCache()` | websocket_protocol.cc | 添加 msg_id 到缓存（FIFO 淘汰） |
+| `MSG_ID_CACHE_SIZE` | websocket_protocol.h | 缓存大小常量（100） |
+| `msg_id_queue_` | websocket_protocol.h | FIFO 队列，用于淘汰旧 ID |
+| `msg_id_set_` | websocket_protocol.h | 集合，用于快速查找 |
+
+
+---
+
+## 2025-12-12 (开锁方式枚举扩展)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 扩展 `UnlockMethod` 枚举，新增人脸和临时密码开锁方式 |
+
+### 具体变更
+
+**枚举文档注释增强**
+- 位置: `UnlockMethod` 枚举定义前（第 168-178 行）
+- 变更: 添加与服务器协议 v5.0 对应的 method 字段说明
+- 说明: 列出所有开锁方式与服务器协议字段的映射关系
+
+**新增枚举值**
+- 位置: `UnlockMethod` 枚举（第 179-187 行）
+- 变更:
+  - 新增 `UNLOCK_FACE = 0x06` - 人脸开锁 (对应服务器 `face`)
+  - 新增 `UNLOCK_TEMP_PWD = 0x07` - 临时密码开锁 (对应服务器 `temp_pwd`)
+
+**现有枚举值注释更新**
+- 位置: `UnlockMethod` 枚举各成员
+- 变更: 在注释中添加对应的服务器协议字段名
+- 示例:
+  - `UNLOCK_FINGERPRINT` → `///< 指纹开锁 (finger)`
+  - `UNLOCK_NFC` → `///< NFC 开锁 (nfc)`
+  - `UNLOCK_PASSWORD` → `///< 密码开锁 (pwd)`
+  - `UNLOCK_REMOTE` → `///< 远程开锁 (remote)`
+  - `UNLOCK_KEY` → `///< 钥匙开锁 (key)`
+
+### 功能说明
+
+完善开锁方式枚举，与服务器协议 v5.0 规范对齐：
+1. 支持人脸识别开锁日志上报（`method: "face"`）
+2. 支持临时密码开锁日志上报（`method: "temp_pwd"`）
+3. 便于 `GetUnlockMethodString()` 函数扩展，正确转换所有开锁方式
+
+### 协议对应关系
+
+| 枚举值 | 十六进制 | 服务器 method |
+|--------|----------|---------------|
+| `UNLOCK_FINGERPRINT` | 0x01 | `finger` |
+| `UNLOCK_NFC` | 0x02 | `nfc` |
+| `UNLOCK_PASSWORD` | 0x03 | `pwd` |
+| `UNLOCK_REMOTE` | 0x04 | `remote` |
+| `UNLOCK_KEY` | 0x05 | `key` |
+| `UNLOCK_FACE` | 0x06 | `face` |
+| `UNLOCK_TEMP_PWD` | 0x07 | `temp_pwd` |
+
+
+---
+
+## 2025-12-12 (锁控协议文件完整性修复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 修复文件末尾截断问题 |
+
+### 具体变更
+
+**修复 DecodePassword() 方法文档注释**
+- 位置: `LockProtocol` 类末尾（第 356-365 行）
+- 变更: 补全被截断的 Doxygen 文档注释
+- 内容:
+  - `@brief` - 解码密码（BCD 格式，旧版兼容）
+  - `@param data` - 3 字节编码数据
+  - `@return` - 解码后的 6 位数字字符串
+  - `@deprecated` - 建议使用 DecodePasswordHex
+
+**修复文件结构**
+- 变更: 添加缺失的类结束大括号 `};` 和命名空间结束标记 `}  // namespace xiaozhi`
+- 说明: 确保文件语法完整，可正常编译
+
+### 功能说明
+
+本次变更为文件完整性修复，不涉及功能逻辑修改。修复了文件末尾被意外截断导致的语法不完整问题。
+
+
+---
+
+## 2025-12-12 (ERR_TIMEOUT 错误码修正)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 修正 `ERR_TIMEOUT` 错误码值 |
+
+### 具体变更
+
+**ERR_TIMEOUT 值修正**
+- 位置: `AckError` 枚举（第 85 行）
+- 变更: `ERR_TIMEOUT = 0x07` → `ERR_TIMEOUT = 0xFF`
+- 说明: 与 STM32 端协议规范对齐
+
+### 功能说明
+
+修正 ACK 错误码定义，使其与 `智能猫眼门锁系统-STM32端.md` 文档中的协议规范保持一致：
+
+| 错误码 | 宏定义 | 说明 |
+|--------|--------|------|
+| 0x01 | `ERR_BUSY` | 设备忙 |
+| 0x02 | `ERR_UNSUPPORT` | 不支持的指令 |
+| 0x03 | `ERR_PARAM` | 参数错误 |
+| 0x04 | `ERR_FP_FULL` | 指纹库已满 |
+| 0x05 | `ERR_NFC_FULL` | NFC 卡库已满 |
+| 0x06 | `ERR_HARDWARE` | 硬件故障 |
+| 0xFF | `ERR_TIMEOUT` | 操作超时 |
+
+此修正确保 ESP32 与 STM32 之间的错误码解析一致，避免通信时错误码误判。
+
+
+---
+
+## 2025-12-12 (人脸开锁用户ID记录)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.h` | 新增成员变量用于记录人脸识别用户ID |
+
+### 具体变更
+
+**新增 last_face_user_id_ 成员变量**
+- 位置: `Application` 类私有成员区域（第 146 行，`face_recognition_in_progress_` 之后）
+- 类型: `int`
+- 初始值: `0`
+- 注释: `///< 最近一次人脸识别的用户ID（用于补充开锁日志）`
+
+### 功能说明
+
+实现 v5.0 协议中人脸开锁日志的用户 ID 补充机制：
+
+1. **背景**: STM32 上报人脸开锁日志时，D1 字段固定为 0x00（无法识别具体用户）
+2. **解决方案**: ESP32 在收到服务器人脸识别结果（`face_result`）时，将 `user_id` 保存到 `last_face_user_id_`
+3. **使用场景**: 当 STM32 上报 `RPT_UNLOCK`（开锁方式为人脸）时，ESP32 使用 `last_face_user_id_` 补充 `uid` 字段后再上报服务器
+
+### 协议对应
+
+参考 `智能猫眼门锁系统-ESP32与服务器通信协议规范-v5.0.md` 第 3.2.3 节：
+
+> **人脸开锁特殊处理：** STM32 上报 D1=0x00，ESP32 根据最近一次人脸识别结果补充 user_id
+
+### 待实现
+
+需要在以下位置添加相关逻辑：
+1. `HandleSmartLockJsonMessage()` - 处理 `face_result` 时保存 `user_id` 到 `last_face_user_id_`
+2. `HandleLockReportMessage()` - 处理 `RPT_UNLOCK` 人脸开锁时使用 `last_face_user_id_`
+
+
+---
+
+## 2025-12-12 (人脸识别用户ID缓存实现)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 在 `HandleFaceRecognitionResult()` 中实现用户ID缓存逻辑 |
+
+### 具体变更
+
+**人脸识别授权通过时保存 user_id**
+- 位置: `HandleFaceRecognitionResult()` 函数，授权通过分支（第 1523-1530 行）
+- 变更: 从服务器返回的 `face_result` 中提取 `user_id`，保存到 `last_face_user_id_` 成员变量
+- 日志: 添加 `ESP_LOGI` 记录保存的用户ID
+
+**授权拒绝时清除缓存**
+- 位置: `HandleFaceRecognitionResult()` 函数，授权拒绝分支（第 1540-1541 行）
+- 变更: 将 `last_face_user_id_` 重置为 0
+- 说明: 避免错误的用户ID被用于后续开锁日志
+
+### 功能说明
+
+实现 v5.0 协议中人脸开锁日志的用户 ID 补充机制：
+
+1. **背景**: STM32 上报人脸开锁日志时，D1 字段固定为 0x00（无法识别具体用户）
+2. **解决方案**: 
+   - 服务器返回 `face_result` 时，ESP32 将 `user_id` 缓存到 `last_face_user_id_`
+   - 当 STM32 上报 `RPT_UNLOCK`（人脸开锁）时，使用缓存的 ID 补充 `uid` 字段
+3. **安全处理**: 授权失败时清除缓存，防止错误关联
+
+### 协议对应
+
+参考 `智能猫眼门锁系统-ESP32与服务器通信协议规范-v5.0.md` 第 3.2.3 节：
+
+> **人脸开锁特殊处理：** STM32 上报 D1=0x00，ESP32 根据最近一次人脸识别结果补充 user_id
+
+### 待完成
+
+需要在 `HandleLockReportMessage()` 中添加逻辑：当处理 `RPT_UNLOCK` 且开锁方式为人脸时，使用 `last_face_user_id_` 替换 `uid` 字段。
+
+
+---
+
+## 2025-12-12 (临时密码设置功能实现)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_control.cc` | 新增 `SetTempPassword()` 方法实现 |
+
+### 具体变更
+
+**新增 SetTempPassword() 方法**
+- 位置: `LockControlService` 类，`QueryPassword()` 函数之后（第 384-429 行）
+- 功能: 设置临时密码及其有效期
+
+**实现逻辑**
+1. 验证密码范围（0-999999），超出则返回错误
+2. 验证有效期范围（最大 16777215 秒），超出则截断并警告
+3. 第1包：发送密码值（TYPE = 0x32），使用 `EncodePasswordHex()` 编码
+4. 等待 50ms 让 STM32 处理
+5. 第2包：发送有效期（TYPE = 0x33），3 字节大端格式
+
+### 功能说明
+
+实现 v5.0 协议中服务器下发临时密码的功能：
+
+```json
+{
+    "type": "lock_control",
+    "msg_id": "cmd_1002",
+    "command": "temp_code",
+    "code": "123456",
+    "expires": 3600
+}
+```
+
+对应 STM32 协议：
+- `TEMP_PWD_SET` (0x32): 密码值，Hex 编码
+- `TEMP_PWD_EXP` (0x33): 有效期秒数，3 字节大端
+
+STM32 收到两包后启动倒计时，到期自动清除临时密码。用户使用临时密码开锁时，STM32 上报 `RPT_UNLOCK` (D0=0x06)。
+
+### 协议对应
+
+| 参数 | 范围 | 编码方式 |
+|------|------|----------|
+| password | 0 ~ 999999 | Hex 整数，3 字节大端 |
+| expires | 0 ~ 16777215 秒 | 3 字节大端 |
+
+
+
+---
+
+## 2025-12-12 (临时密码功能移除)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_control.cc` | 删除 `SetTempPassword()` 方法实现 |
+
+### 具体变更
+
+**删除 SetTempPassword() 方法**
+- 位置: `LockControlService` 类，原第 384-429 行
+- 变更: 完全移除该方法的实现代码（43 行）
+- 说明: 该方法用于设置临时密码及其有效期
+
+**被删除的功能**
+- 验证密码范围（0-999999）
+- 验证有效期范围（最大 16777215 秒）
+- 第1包：发送密码值（TYPE = 0x32，`TEMP_PWD_SET`）
+- 第2包：发送有效期（TYPE = 0x33，`TEMP_PWD_EXP`）
+
+### 功能说明
+
+移除临时密码设置功能的实现。该功能原本对应 v5.0 协议中服务器下发临时密码的命令：
+
+```json
+{
+    "type": "lock_control",
+    "command": "temp_code",
+    "code": "123456",
+    "expires": 3600
+}
+```
+
+### 备注
+
+- 头文件 `lock_control.h` 中的方法声明可能仍然存在，需要同步删除或保留为未实现状态
+- 如需恢复此功能，可参考 CHANGELOG 2025-12-12 (临时密码设置功能实现) 条目中的实现逻辑
+
+
+---
+
+## 2025-12-12 (临时密码设置功能恢复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_control.cc` | 恢复 `SetTempPassword()` 方法实现 |
+
+### 具体变更
+
+**恢复 SetTempPassword() 方法**
+- 位置: `LockControlService` 类，`QueryPassword()` 方法之后（第 384-429 行）
+- 功能: 设置临时密码及其有效期
+
+**实现逻辑**
+1. 验证密码范围（0-999999），超出则返回错误
+2. 验证有效期范围（最大 16777215 秒），超出则返回错误
+3. 第1包：发送密码值（TYPE = 0x32 `TEMP_PWD_SET`），使用 `EncodePasswordHex()` 编码
+4. 等待 50ms 让 STM32 处理
+5. 第2包：发送有效期（TYPE = 0x33 `TEMP_PWD_EXP`），3 字节大端格式
+
+### 功能说明
+
+恢复 v5.0 协议中服务器下发临时密码的功能：
+
+```json
+{
+    "type": "lock_control",
+    "msg_id": "cmd_1002",
+    "command": "temp_code",
+    "code": "123456",
+    "expires": 3600
+}
+```
+
+对应 STM32 协议：
+- `TEMP_PWD_SET` (0x32): 密码值，Hex 编码（3 字节大端）
+- `TEMP_PWD_EXP` (0x33): 有效期秒数（3 字节大端）
+
+STM32 收到两包后启动倒计时，到期自动清除临时密码。
+
+### 协议对应
+
+| 参数 | 范围 | 编码方式 |
+|------|------|----------|
+| password | 0 ~ 999999 | Hex 整数，3 字节大端 |
+| expires | 0 ~ 16777215 秒 | 3 字节大端 |
+
+
+---
+
+## 2025-12-12 (临时密码命令处理修复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 修复临时密码设置逻辑，调整枚举顺序 |
+
+### 具体变更
+
+**GetUnlockMethodString() 枚举顺序调整**
+- 位置: 第 1335-1340 行
+- 变更: 将 `UNLOCK_TEMP_PWD` (0x06) 和 `UNLOCK_FACE` (0x07) 的 case 顺序交换
+- 说明: 使代码顺序与 `lock_protocol.h` 中枚举定义顺序一致
+
+**临时密码命令处理修复**
+- 位置: `HandleSmartLockJsonMessage()` 函数，`lock_control` 消息处理分支，`temp_code` 命令
+- 变更:
+  - 修复: 原代码错误调用 `SetPassword()` 设置全局密码
+  - 修复后: 正确调用 `SetTempPassword(pwd, exp_seconds)` 设置临时密码
+  - 新增: 解析 `expires` 参数，默认值 3600 秒
+
+### 功能说明
+
+修复服务器下发临时密码命令的处理逻辑：
+
+```json
+{
+    "type": "lock_control",
+    "msg_id": "cmd_1002",
+    "command": "temp_code",
+    "code": "123456",
+    "expires": 3600
+}
+```
+
+修复前：错误调用 `SetPassword()` 覆盖全局密码
+修复后：正确调用 `SetTempPassword()` 设置临时密码及有效期
+
+临时密码通过两包 UART 消息发送给 STM32：
+- 第1包 (TYPE=0x32): 密码值
+- 第2包 (TYPE=0x33): 有效期秒数
