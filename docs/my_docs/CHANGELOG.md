@@ -1283,3 +1283,450 @@ STM32 收到两包后启动倒计时，到期自动清除临时密码。
 临时密码通过两包 UART 消息发送给 STM32：
 - 第1包 (TYPE=0x32): 密码值
 - 第2包 (TYPE=0x33): 有效期秒数
+
+
+---
+
+## 2026-01-14 (锁控协议空值常量)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 新增协议空值常量 `LOCK_PROTOCOL_EMPTY` |
+
+### 具体变更
+
+**新增 LOCK_PROTOCOL_EMPTY 常量**
+- 位置: 协议常量定义区域（`LOCK_PROTOCOL_DATA_LEN` 之后，约第 41 行）
+- 类型: `constexpr uint8_t`
+- 值: `0xFF`
+- 注释: `///< 协议空值（未使用字段填充），用于 v2.4+ 协议兼容`
+
+### 功能说明
+
+这是锁控协议升级（v2.1 → v2.7）的第一步实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的任务 1.1。
+
+根据 STM32 协议 v2.4 的变更，未使用的数据字段从 `0x00` 改为 `0xFF`，以便区分有效数据和未使用字段。此常量将用于：
+- `BuildAckOk()` / `BuildAckErr()` 方法中填充 D1/D2 字段
+- 所有发送命令方法中填充未使用的数据字段
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32锁控协议升级需求.md` 第 3.1.6 节和 `docs/my_docs/智能猫眼门锁系统-STM32端 - 副本.md` v2.4 版本说明：
+
+> v2.4 | 2026-01-12 | 协议空值统一改为 0xFF（原 0x00），便于区分有效数据和未使用字段
+
+
+
+---
+
+## 2026-01-14 (SendLock 空值字段修复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_control.cc` | `SendLock()` 方法 D2 字段改用 `LOCK_PROTOCOL_EMPTY` |
+
+### 具体变更
+
+**SendLock() 方法空值字段修复**
+- 位置: `SendLock()` 函数，第 247 行
+- 变更: `{static_cast<uint8_t>(mode), hold_seconds, 0x00}` → `{static_cast<uint8_t>(mode), hold_seconds, LOCK_PROTOCOL_EMPTY}`
+- 说明: D2 字段从 `0x00` 改为 `0xFF`，符合 STM32 协议 v2.4+ 规范
+
+### 功能说明
+
+这是锁控协议升级（v2.1 → v2.7）任务 2.1 的一部分实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的 `SendLock: D2 改为 LOCK_PROTOCOL_EMPTY`。
+
+根据 STM32 协议 v2.4 的变更，未使用的数据字段统一使用 `0xFF` 填充，以便区分有效数据和未使用字段。
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32锁控协议升级需求.md` 第 3.3.1 节：
+
+> 所有发送命令时，未使用的字段从 `0x00` 改为 `0xFF`
+
+
+
+---
+
+## 2026-01-14 (两级确认机制接口声明)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/protocols/websocket_protocol.h` | 新增 `SendEsp32Ack()` 方法声明，更新 `SendAck()` 方法注释 |
+
+### 具体变更
+
+**SendAck() 方法注释更新**
+- 位置: `WebsocketProtocol` 类 v5.0 协议扩展方法区域（第 64-70 行）
+- 变更:
+  - 注释从"发送 ACK 响应"改为"发送 ACK 响应（第二级确认：命令执行完成）"
+  - 参数名从 `msg_id` 改为 `seq_id`，与协议规范统一
+- 说明: 明确 `ack` 消息的语义为"命令执行完成"
+
+**新增 SendEsp32Ack() 方法声明**
+- 位置: `SendAck()` 方法之后（第 72-78 行）
+- 方法签名: `void SendEsp32Ack(const std::string& seq_id, int code = 0, const std::string& msg = "received")`
+- 功能: 发送 esp32_ack 响应（第一级确认：命令已收到）
+- 参数:
+  - `seq_id`: 消息序列号
+  - `code`: 响应码（默认 0）
+  - `msg`: 响应消息（默认 "received"）
+
+### 功能说明
+
+这是锁控协议升级任务 4.1 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的"新增 SendEsp32Ack 方法"。
+
+实现两级确认机制的接口声明：
+- **esp32_ack（第一级）**: ESP32 收到服务器命令时立即发送，表示"命令已收到，开始处理"
+- **ack（第二级）**: STM32 执行完成后发送，表示"命令执行完成"
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32消息ID追溯机制改进需求.md` 第 2.2 节：
+
+```json
+// esp32_ack：命令已收到，开始处理
+{
+    "type": "esp32_ack",
+    "seq_id": "1702234567890_0",
+    "code": 0,
+    "msg": "received"
+}
+
+// ack：执行完成
+{
+    "type": "ack",
+    "seq_id": "1702234567890_0",
+    "code": 0,
+    "msg": "OK"
+}
+```
+
+### 待实现
+
+需要在 `websocket_protocol.cc` 中实现 `SendEsp32Ack()` 方法的具体逻辑。
+
+
+
+---
+
+## 2026-01-14 (密码上报方法声明)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/protocols/websocket_protocol.h` | 新增 `SendPasswordReport()` 方法声明 |
+
+### 具体变更
+
+**新增 SendPasswordReport() 方法声明**
+- 位置: `WebsocketProtocol` 类，`SendUserMgmtResult()` 方法之后，`private` 区域之前（第 122-130 行）
+- 方法签名: `void SendPasswordReport(uint32_t password)`
+- 功能: 发送密码上报消息到服务器
+- 参数:
+  - `password`: 密码值（0-999999）
+
+**Doxygen 文档注释**
+- `@brief`: 发送密码上报
+- `@param password`: 密码值（0-999999）
+- 说明: 发送 JSON 消息：type="password_report", ts, data.password；密码格式化为 6 位零填充字符串
+
+### 功能说明
+
+这是锁控协议升级任务 4.3 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的"新增 SendPasswordReport 方法"。
+
+用于将 STM32 返回的密码查询结果（RPT_PWD）上报到服务器，实现密码同步功能。
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32锁控事件处理修改需求.md` 第 3.1 节：
+
+```json
+{
+    "type": "password_report",
+    "ts": 1702234567890,
+    "data": {
+        "password": "123456"
+    }
+}
+```
+
+### 待实现
+
+需要在 `websocket_protocol.cc` 中实现 `SendPasswordReport()` 方法的具体逻辑。
+
+
+
+---
+
+## 2026-01-14 (待处理命令队列数据结构)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.h` | 新增待处理命令队列相关数据结构定义 |
+
+### 具体变更
+
+**新增 PendingCommandType 枚举**
+- 位置: `Application` 类定义之前，事件宏定义之后（约第 46-58 行）
+- 功能: 定义待处理命令的类型，用于区分不同类型命令的 ack 发送时机
+- 枚举值:
+  - `IMMEDIATE`: 即时命令，收到 STM32 ACK 后即可发送 ack
+  - `QUERY`: 查询命令，需要等待 STM32 ACK + 数据帧后发送 ack
+  - `LONG_FLOW`: 长流程命令，需要等待 STM32 ACK + 最终结果后发送 ack
+
+**新增 PendingCommand 结构体**
+- 位置: `PendingCommandType` 枚举之后（约第 60-83 行）
+- 功能: 保存服务器下发命令的上下文信息，用于关联 STM32 响应与原始 seq_id
+- 成员变量:
+  - `seq_id`: 原始消息 ID（来自服务器）
+  - `type`: 命令类型（PendingCommandType 枚举）
+  - `category`: 类别（finger/nfc/password/lock/dev/query）
+  - `command`: 命令（add/del/clear/query/unlock/lock/beep/...）
+  - `uart_type`: UART 命令 TYPE
+  - `uart_subtype`: UART 子命令（用于指纹/NFC）
+  - `timestamp_ms`: 发送时间戳（毫秒）
+  - `esp32_ack_sent`: 是否已发送 esp32_ack
+  - `stm32_ack_received`: 是否已收到 STM32 ACK
+  - `stm32_error_code`: STM32 ACK 错误码（0 表示成功）
+
+### 功能说明
+
+这是锁控协议升级任务 5.1 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的"新增数据结构定义"。
+
+实现两级确认机制（seq_id 追溯）的基础数据结构：
+- `PendingCommandType` 用于确定何时发送最终 ack
+- `PendingCommand` 用于保存命令上下文，在收到 STM32 响应时能够关联原始 seq_id
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32消息ID追溯机制改进需求.md` 第 4 节数据结构设计：
+
+| 命令类型 | STM32 策略 | esp32_ack 时机 | ack 时机 |
+|---------|-----------|----------------|----------|
+| IMMEDIATE | 执行后 ACK | 收到命令时 | 收到 STM32 ACK 时 |
+| QUERY | 先 ACK 后数据 | 收到命令时 | 收到数据帧时 |
+| LONG_FLOW | 先 ACK 后上报 | 收到命令时 | 收到最终结果时 |
+
+### 待实现
+
+需要在 `Application` 类中添加以下成员和方法：
+- `pending_commands_` 成员变量（`std::map<uint8_t, PendingCommand>`）
+- `DetermineCommandType()` 方法
+- `GetUartType()` 方法
+- `CleanupPendingCommands()` 方法
+- `GetTimeoutForType()` 方法
+- `MapStm32ErrorCode()` 方法
+
+
+---
+
+## 2026-01-14 (EVT_TAMPER 事件处理简化)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 简化 `EVT_TAMPER` 撬锁报警事件处理逻辑 |
+
+### 具体变更
+
+**EVT_TAMPER 事件处理修改**
+- 位置: `HandleLockReportMessage()` 函数，`EVT_TAMPER` case 分支（约第 1120-1125 行）
+- 变更:
+  - 移除 `HandleTamperAlert(param)` 调用
+  - 日志级别从 `ESP_LOGI` 改为 `ESP_LOGW`
+  - 添加注释说明变更原因
+
+**修改前**:
+```cpp
+case static_cast<uint8_t>(xiaozhi::EventId::EVT_TAMPER):
+    event_name = "tamper";
+    ESP_LOGI(TAG, "撬锁报警 (级别 %d)", param);
+    HandleTamperAlert(param);
+    break;
+```
+
+**修改后**:
+```cpp
+case static_cast<uint8_t>(xiaozhi::EventId::EVT_TAMPER):
+    event_name = "tamper";
+    // v2.7 协议升级：移除本地报警处理，仅保留日志和服务器上报
+    // STM32 已负责蜂鸣器报警，ESP32 不再重复处理
+    ESP_LOGW(TAG, "撬锁报警 (级别 %d)", param);
+    break;
+```
+
+### 功能说明
+
+这是锁控协议升级（v2.1 → v2.7）任务 7.1 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的 `修改 EVT_TAMPER 处理逻辑`。
+
+根据 `docs/my_docs/ESP32锁控事件处理修改需求.md` 的设计原则：
+- ESP32 屏幕仅用于显示摄像头画面，不显示其他状态信息
+- ESP32 扬声器用于语音播报，不播放警报音效
+- STM32 端负责处理蜂鸣器警报
+
+**变更效果**：
+- ❌ 移除：`HandleTamperAlert()` 调用（蜂鸣器报警 + 显示警告）
+- ✅ 保留：日志记录（级别改为 WARN）
+- ✅ 保留：上报服务器 `event_report: tamper`
+
+
+
+---
+
+## 2026-01-14 (EVT_DOOR_OPEN 事件处理修改)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 修改 `EVT_DOOR_OPEN` 事件处理逻辑 |
+
+### 具体变更
+
+**EVT_DOOR_OPEN 处理逻辑修改**
+- 位置: `HandleLockReportMessage()` 函数，`EVT_DOOR_OPEN` 分支
+- 变更:
+  - 移除 `HandleDoorNotClosed()` 调用（不再显示警告弹窗）
+  - 日志级别从 `ESP_LOGI` 改为 `ESP_LOGW`
+  - 新增语音播报：`audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION)`
+  - 添加注释说明这是 v2.7 协议升级的一部分
+
+### 功能说明
+
+这是锁控协议升级（v2.1 → v2.7）任务 7.2 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的 `修改 EVT_DOOR_OPEN 处理逻辑`。
+
+根据 `docs/my_docs/ESP32锁控事件处理修改需求.md` 的设计原则：
+- ESP32 屏幕仅用于显示摄像头画面，不显示其他状态信息
+- ESP32 扬声器用于语音播报
+
+**变更效果**：
+- ❌ 移除：`HandleDoorNotClosed()` 调用（显示警告弹窗）
+- ✅ 新增：语音播报（使用 `OGG_EXCLAMATION` 警告音效）
+- ✅ 保留：日志记录（级别改为 WARN）
+- ✅ 保留：上报服务器 `event_report: door_open`
+
+**备注**：当前使用 `OGG_EXCLAMATION` 作为临时音效，后续可替换为专用的 "门未关好，请检查" 语音提示（`OGG_DOOR_NOT_CLOSED`）。
+
+
+
+---
+
+## 2026-01-14 (lock_control 两级确认机制实现)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 在 `lock_control` 消息处理中实现两级确认机制 |
+
+### 具体变更
+
+**修改位置**: `HandleSmartLockJsonMessage()` 函数，`lock_control` 消息处理分支（约第 1744-1830 行）
+
+**1. seq_id 字段解析**
+- 新增 `seq_id` 字段解析，优先使用 `seq_id`，兼容旧版 `msg_id`
+- 变量名从 `msg_id_str` 改为 `seq_id_str`
+
+**2. 第一级确认（esp32_ack）**
+- 收到命令后立即发送 `esp32_ack`，表示"命令已收到，开始处理"
+- 通过 `dynamic_cast` 获取 `WebsocketProtocol` 指针调用 `SendEsp32Ack()`
+
+**3. 待处理命令保存**
+- 创建 `PendingCommand` 结构体，保存命令上下文信息
+- 将命令保存到 `pending_commands_` 映射表，key 为 `uart_type`
+- 用于后续收到 STM32 响应时关联原始 `seq_id`
+
+**4. 错误码调整**
+- 硬件故障（锁控服务不可用）：从 `3` 改为 `6`
+- 未知命令：从 `2` 改为 `4`（不支持）
+- 符合 `docs/my_docs/ESP32消息ID追溯机制改进需求.md` 第 7.3 节统一错误码定义
+
+**5. ACK 发送逻辑调整**
+- 移除原来在 Schedule 末尾统一发送 ACK 的逻辑
+- 错误情况（锁控服务不可用、未知命令）直接发送 `ack`
+- 正常命令等待 STM32 响应后通过 `pending_commands_` 机制发送 `ack`
+
+### 功能说明
+
+这是锁控协议升级任务 8.1 的实现，对应 `.kiro/specs/lock-control-upgrade/tasks.md` 中的 `修改服务器命令处理入口`。
+
+实现 `lock_control` 消息的两级确认机制：
+- **第一级（esp32_ack）**: 收到命令时立即发送，表示"命令已收到，开始处理"
+- **第二级（ack）**: 等待 STM32 执行完成后发送，表示"命令执行完成"
+
+### 协议对应
+
+参考 `docs/my_docs/ESP32消息ID追溯机制改进需求.md` 第 6.1 节即时命令流程：
+
+```
+Server                  ESP32                   STM32
+ │                       │                       │
+ │ lock_control          │                       │
+ │ seq_id=xxx            │                       │
+ │──────────────────────►│                       │
+ │                       │                       │
+ │ esp32_ack             │ ← 第一级：命令已收到   │
+ │ seq_id=xxx            │                       │
+ │◄──────────────────────│                       │
+ │                       │                       │
+ │                       │ 保存 pending          │
+ │                       │ uart_type=0x10        │
+ │                       │                       │
+ │                       │ CMD_LOCK              │
+ │                       │──────────────────────►│
+ │                       │                       │
+ │                       │ ACK_OK (TYPE=0x10)    │
+ │                       │◄──────────────────────│
+ │                       │                       │
+ │ ack (seq_id=xxx)      │ ← 第二级：执行完成     │
+ │ code=0, msg=OK        │                       │
+ │◄──────────────────────│                       │
+```
+
+### 待完成
+
+需要在 `HandleLockSystemMessage()` 中实现 STM32 ACK 响应处理逻辑：
+- 匹配 `pending_commands_` 中的待处理命令
+- 发送最终 `ack` 响应
+- 清理 `pending_commands_` 条目
+
+
+
+---
+
+## 2026-01-14 (密码格式化类型修复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/protocols/websocket_protocol.cc` | 修复 `SendPasswordReport()` 方法中的类型格式化警告 |
+
+### 具体变更
+
+**SendPasswordReport() 类型格式化修复**
+- 位置: `SendPasswordReport()` 函数，第 630 行
+- 变更: 
+  - 格式化字符串从 `"%06u"` 改为 `"%06lu"`
+  - 添加类型转换 `(unsigned long)(password % 1000000)`
+- 原代码: `snprintf(password_str, sizeof(password_str), "%06u", password % 1000000);`
+- 新代码: `snprintf(password_str, sizeof(password_str), "%06lu", (unsigned long)(password % 1000000));`
+
+### 功能说明
+
+修复编译器类型警告，确保 `uint32_t` 类型的密码值在不同平台上正确格式化：
+- `%u` 对应 `unsigned int`，在某些平台上可能与 `uint32_t` 大小不匹配
+- `%lu` 对应 `unsigned long`，配合显式类型转换确保跨平台兼容性
+- 保持密码输出为 6 位零填充格式（如 "000123"、"123456"）
+

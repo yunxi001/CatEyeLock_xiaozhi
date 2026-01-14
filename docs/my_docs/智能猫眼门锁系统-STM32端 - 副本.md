@@ -1,7 +1,7 @@
 # ESP32 ↔ STM32 锁控通信协议规范
 
-> 版本：v2.6  
-> 更新日期：2026-01-12  
+> 版本：v2.7  
+> 更新日期：2026-01-13  
 > 适用于：智能猫眼门锁系统
 
 ---
@@ -57,15 +57,15 @@
 
 **错误码定义 (D1)**：
 
-| 错误码 | 宏定义          | 说明             |
-| :----- | :-------------- | :--------------- |
-| 0x01   | `ERR_BUSY`      | 设备忙           |
-| 0x02   | `ERR_UNSUPPORT` | 不支持的指令     |
-| 0x03   | `ERR_PARAM`     | 参数错误         |
-| 0x04   | `ERR_FP_FULL`   | 指纹库已满       |
-| 0x05   | `ERR_NFC_FULL`  | NFC 卡库已满     |
-| 0x06   | `ERR_HARDWARE`  | 硬件故障         |
-| 0xFF   | `ERR_TIMEOUT`   | 操作超时         |
+| 错误码 | 宏定义              | 说明                 |
+| :----- | :------------------ | :------------------- |
+| 0x01   | `ERR_BUSY`          | 设备忙/操作进行中    |
+| 0x02   | `ERR_UNSUPPORT`     | 不支持的指令         |
+| 0x03   | `ERR_PARAM`         | 参数错误             |
+| 0x04   | `ERR_FP_FULL`       | 指纹库已满           |
+| 0x05   | `ERR_NFC_FULL`      | NFC 卡库已满         |
+| 0x06   | `ERR_HARDWARE`      | 硬件故障             |
+| 0xFF   | `ERR_TIMEOUT`       | 操作超时             |
 
 
 ---
@@ -88,6 +88,18 @@
 | :---- | :----- |
 | 0x01  | 开锁   |
 | 0x02  | 关锁   |
+
+**CMD_LOCK 响应规则**：
+
+| 当前状态 | 开锁命令 (D0=0x01) | 关锁命令 (D0=0x02) |
+| :------- | :----------------- | :----------------- |
+| 已上锁   | 成功触发 → ACK     | 已上锁 → ACK (幂等) |
+| 已开锁   | 已开锁 → ACK (幂等) | 成功触发 → ACK     |
+| 开锁中   | NACK + `ERR_BUSY`  | 成功触发 → ACK     |
+| 上锁中   | 成功触发 → ACK     | NACK + `ERR_BUSY`  |
+| 其他状态 | NACK + `ERR_BUSY`  | NACK + `ERR_BUSY`  |
+
+> **说明**：开锁/关锁命令采用幂等设计，重复发送相同命令不会报错。只有在操作进行中时才返回 `ERR_BUSY`。
 
 **CMD_OLED 图标 ID (D0)**：
 
@@ -451,7 +463,106 @@
 
 ---
 
-## 7. 注意事项
+## 7. ACK 响应规则
+
+> **核心原则**：ACK 尽可能在命令执行完成后回复，以便 ESP32 准确判断命令执行结果。
+
+### 7.1 ACK 响应策略分类
+
+| 策略类型 | 说明 | 适用场景 |
+|----------|------|----------|
+| **执行后 ACK** | 命令执行完成后回复 ACK/NACK | 即时执行的短命令 |
+| **先 ACK 后数据** | 先回复 ACK，再发送数据帧 | 查询类命令 |
+| **先 ACK 后上报** | 先回复 ACK，过程通过 Report 帧上报 | 长流程交互命令 |
+
+### 7.2 控制命令 (CAT_CMD) ACK 规则
+
+| 命令 | TYPE | ACK 时机 | 成功响应 | 失败响应 |
+|------|------|----------|----------|----------|
+| `CMD_LOCK` | 0x10 | 执行后 | ACK (含幂等) | NACK + `ERR_BUSY` |
+| `CMD_OLED` | 0x11 | 执行后 | ACK | NACK + 错误码 |
+| `CMD_BEEP` | 0x12 | 执行后 | ACK | - |
+| `CMD_SYNC_T` | 0x13 | 校验后 | ACK | NACK + `ERR_PARAM` |
+| `CMD_LIGHT` | 0x14 | 执行后 | ACK | - |
+| `Q_SENSORS` | 0x80 | 先 ACK | ACK + `RPT_ENV` | - |
+| `Q_STATUS` | 0x81 | 先 ACK | ACK + `RPT_STATE` | - |
+
+**CMD_LOCK 详细响应规则**：
+
+| 当前状态 | 开锁命令 (D0=0x01) | 关锁命令 (D0=0x02) |
+|----------|--------------------|--------------------|
+| 已上锁 | 成功触发 → ACK | 已上锁 → ACK (幂等) |
+| 已开锁 | 已开锁 → ACK (幂等) | 成功触发 → ACK |
+| 开锁中 | NACK + `ERR_BUSY` | 成功触发 → ACK |
+| 上锁中 | 成功触发 → ACK | NACK + `ERR_BUSY` |
+| 其他状态 | NACK + `ERR_BUSY` | NACK + `ERR_BUSY` |
+
+**说明**：
+- `CMD_LOCK`：采用幂等设计，重复发送相同命令返回 ACK；操作进行中返回 NACK + `ERR_BUSY`
+- `Q_SENSORS` / `Q_STATUS`：先发 ACK 确认收到查询请求，再发送数据帧
+
+### 7.3 用户管理命令 (CAT_USER) ACK 规则
+
+#### 指纹命令 (TYPE = 0x10)
+
+| 子命令 | D0 | ACK 时机 | 说明 |
+|--------|-----|----------|------|
+| 录入 | 0x01 | **先 ACK** | 长流程，过程通过 `USER_FP_RPT` 上报 |
+| 删除 | 0x02 | 执行后 | 成功 ACK，失败 NACK + `ERR_PARAM` |
+| 清空 | 0x03 | 执行后 | 成功 ACK，失败 NACK + `ERR_HARDWARE` |
+| 查询数量 | 0x04 | 先 ACK | ACK + `USER_FP_RPT` (0x05) |
+| 验证 | 0x05 | **先 ACK** | 长流程，结果通过 `USER_FP_RPT` 上报 |
+
+#### NFC 命令 (TYPE = 0x20)
+
+| 子命令 | D0 | ACK 时机 | 说明 |
+|--------|-----|----------|------|
+| 录入 | 0x01 | **先 ACK** | 长流程，过程通过 `USER_NFC_RPT` 上报 |
+| 删除 | 0x02 | 执行后 | 成功 ACK，失败 NACK + `ERR_PARAM` |
+| 清空 | 0x03 | 执行后 | 成功 ACK，失败 NACK + `ERR_HARDWARE` |
+| 查询数量 | 0x04 | 先 ACK | ACK + `USER_NFC_RPT` (0x05) |
+| 验证 | 0x05 | **先 ACK** | 长流程，结果通过 `USER_NFC_RPT` 上报 |
+
+#### 密码命令
+
+| 命令 | TYPE | ACK 时机 | 说明 |
+|------|------|----------|------|
+| 设置密码 | 0x30 | 执行后 | 写入 Flash 后发 ACK |
+| 查询密码 | 0x31 | 先 ACK | ACK + `RPT_PWD` |
+| 临时密码包1 | 0x32 | 执行后 | 暂存后发 ACK |
+| 临时密码包2 | 0x33 | 执行后 | 设置完成后发 ACK |
+
+### 7.4 长流程命令特殊说明
+
+以下命令需要用户交互，执行时间不确定（可能 5-30 秒），采用 **先 ACK 后上报** 策略：
+
+| 命令 | 说明 | ACK 含义 | 结果上报 |
+|------|------|----------|----------|
+| 指纹录入 | 需按压 3 次 | 命令已接收，开始录入流程 | `USER_FP_RPT` (0x03/0x04/0x06/0x07) |
+| 指纹验证 | 等待用户按压 | 命令已接收，开始验证流程 | `USER_FP_RPT` (0x03/0x04) |
+| NFC 录入 | 等待用户刷卡 | 命令已接收，开始录入流程 | `USER_NFC_RPT` (0x03/0x04/0x06/0x07) |
+| NFC 验证 | 等待用户刷卡 | 命令已接收，开始验证流程 | `USER_NFC_RPT` (0x03/0x04) |
+
+**流程示例（指纹录入）**：
+```
+1. ESP → STM: [AA][03][10][01][00][FF][CS]  (开始录入)
+2. STM → ESP: [AA][00][01][10][FF][FF][CS]  (ACK: 命令已接收)
+3. STM → ESP: [AA][03][11][01][01][FF][CS]  (请按手指, 第 1 次)
+   ... 用户交互过程 ...
+4. STM → ESP: [AA][03][11][03][05][FF][CS]  (录入成功, ID=5)
+```
+
+### 7.5 ESP32 端超时处理建议
+
+| 命令类型 | 建议超时 | 重试次数 |
+|----------|----------|----------|
+| 即时命令 | 1 秒 | 3 次 |
+| 查询命令 | 2 秒 | 2 次 |
+| 长流程命令 | 30 秒 | 不重试 |
+
+---
+
+## 8. 注意事项
 
 1. **ACK 机制**：只有 `CAT_CMD` 和 `CAT_USER` 需要 STM32 回复 ACK
 2. **超时处理**：ESP32 发送命令后应等待 ACK，超时 1 秒可重试（最多 3 次）
@@ -461,45 +572,11 @@
 
 ---
 
-## 8. ESP32 端实现状态
-
-> **说明：** 以下为 ESP32 端代码实现状态，供 STM32 开发参考。
-
-### 8.1 已实现功能
-
-| 功能 | ESP32 代码位置 | 状态 |
-|------|----------------|------|
-| 协议解析 | `LockProtocol::ParseMessage()` | ✅ |
-| 消息构建 | `LockProtocol::BuildMessage()` | ✅ |
-| 开锁/关锁 | `LockControlService::SendLock()` | ✅ |
-| OLED 控制 | `LockControlService::SendOledIcon()` | ✅ |
-| 蜂鸣器控制 | `LockControlService::SendBeep()` | ✅ |
-| 补光灯控制 | `LockControlService::SendLight()` | ✅ |
-| 时间同步 | `LockControlService::SendSyncTime()` | ✅ |
-| 传感器查询 | `LockControlService::QuerySensors()` | ✅ |
-| 状态查询 | `LockControlService::QueryStatus()` | ✅ |
-| 指纹管理 | `LockControlService::FingerprintXxx()` | ✅ |
-| NFC 管理 | `LockControlService::NfcXxx()` | ✅ |
-| 密码管理 | `LockControlService::SetPassword()` | ✅ |
-| 心跳 | `LockControlService::SendPing()` | ✅ |
-| 事件处理 | `Application::HandleLockEvent()` | ✅ |
-
-### 8.2 关键代码文件
-
-| 文件 | 说明 |
-|------|------|
-| `main/lock_control/lock_protocol.h` | 协议定义（枚举、结构体） |
-| `main/lock_control/lock_protocol.cc` | 协议编解码实现 |
-| `main/lock_control/lock_control.h` | 锁控服务接口 |
-| `main/lock_control/lock_control.cc` | 锁控服务实现（UART 收发） |
-| `main/application.cc` | 事件处理与服务器转发 |
-
----
-
 ## 9. 版本历史
 
 | 版本 | 日期 | 变更说明 |
 |------|------|----------|
+| v2.7 | 2026-01-13 | 新增第 7 章 ACK 响应规则；优化 ACK 机制：CMD_LOCK/CMD_BEEP 改为执行后回复，Q_SENSORS/Q_STATUS 新增 ACK 响应；CMD_LOCK 新增幂等设计（已开锁/已上锁返回 ACK，操作中返回 NACK + ERR_BUSY） |
 | v2.6 | 2026-01-12 | 拆分开锁/开门上报：RPT_UNLOCK (0xA1) 仅上报开锁操作，新增 RPT_DOOR_OPENED (0xA2) 上报开门事件；开门来源字段移至 RPT_DOOR_OPENED |
 | v2.5 | 2026-01-12 | 新增 EVT_LOCK_STATUS (0x06) 事件及状态码，RPT_UNLOCK 新增开门来源字段 (D1)，新增自动上锁和室内外检测场景 |
 | v2.4 | 2026-01-12 | 协议空值统一改为 0xFF（原 0x00），便于区分有效数据和未使用字段 |
