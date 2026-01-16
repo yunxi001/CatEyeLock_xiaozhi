@@ -257,8 +257,6 @@ enum class FpSubCmd : uint8_t {
 
 /**
  * @brief 指纹录入响应状态
- *
- * 同时适用于指纹和 NFC 响应
  */
 enum class FpRespStatus : uint8_t {
   FP_PRESS_FINGER = 0x01,   ///< 请按压手指
@@ -269,6 +267,47 @@ enum class FpRespStatus : uint8_t {
   FP_ALREADY_EXISTS = 0x06, ///< 【新增】已存在（v2.7+）
   FP_ID_OCCUPIED = 0x07,    ///< 【新增】ID 被占用（v2.7+）
 };
+
+/**
+ * @brief NFC 子命令
+ */
+enum class NfcSubCmd : uint8_t {
+  NFC_ENROLL = 0x01, ///< 录入
+  NFC_DELETE = 0x02, ///< 删除指定 ID
+  NFC_CLEAR = 0x03,  ///< 清空全部
+  NFC_COUNT = 0x04,  ///< 查询数量
+};
+
+/**
+ * @brief NFC 录入响应状态
+ */
+enum class NfcRespStatus : uint8_t {
+  NFC_TAP = 0x01,            ///< 请刷卡（录入中）
+  NFC_REMOVE_CARD = 0x02,    ///< 请移开卡片
+  NFC_SUCCESS = 0x03,        ///< 录入成功
+  NFC_FAILED = 0x04,         ///< 录入失败
+  NFC_COUNT_RESP = 0x05,     ///< 数量查询响应
+  NFC_ALREADY_EXISTS = 0x06, ///< 已存在（v2.7+）
+  NFC_ID_OCCUPIED = 0x07,    ///< ID 被占用（v2.7+）
+};
+
+/**
+ * @brief 开锁结果码
+ *
+ * 用于 RPT_UNLOCK 消息的 D2 字段
+ */
+enum class UnlockResult : uint8_t {
+  UNLOCK_SUCCESS = 0x00, ///< 开锁成功
+  UNLOCK_FAIL_1 = 0x01,  ///< 失败 1 次
+  UNLOCK_FAIL_2 = 0x02,  ///< 失败 2 次
+  UNLOCK_FAIL_3 = 0x03,  ///< 失败 3 次
+  UNLOCK_FAIL_4 = 0x04,  ///< 失败 4 次
+  UNLOCK_FAIL_5 = 0x05,  ///< 失败 5 次（触发锁定）
+  UNLOCK_LOCKED = 0x06,  ///< 已锁定（D1=剩余锁定时间，单位分钟）
+};
+
+/** 最大连续失败次数 */
+constexpr uint8_t MAX_AUTH_FAIL_COUNT = 5;
 
 // ============================================================================
 // 消息结构体

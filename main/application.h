@@ -248,6 +248,24 @@ private:
   void HandleDoorNotClosed();
 
   /**
+   * @brief 播放认证失败语音（拼接方式）
+   * @param remaining 剩余尝试次数
+   */
+  void PlayAuthFailVoice(uint8_t remaining);
+
+  /**
+   * @brief 播放设备锁定语音（拼接方式）
+   * @param lock_minutes 剩余锁定时间（分钟）
+   */
+  void PlayLockedVoice(uint8_t lock_minutes);
+
+  /**
+   * @brief 播放数字语音
+   * @param number 要播放的数字（0-99）
+   */
+  void PlayNumberVoice(uint8_t number);
+
+  /**
    * @brief 处理智能门锁扩展 JSON 消息
    * @param root JSON 根节点
    * @param type 消息类型字符串

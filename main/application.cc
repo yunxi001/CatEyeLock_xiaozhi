@@ -1120,18 +1120,18 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_TAMPER):
       event_name = "tamper";
-      // v2.7 协议升级：移除本地报警处理，仅保留日志和服务器上报
-      // STM32 已负责蜂鸣器报警，ESP32 不再重复处理
+      // v2.8 协议升级：播放撬锁报警语音
+      // STM32 负责蜂鸣器报警，ESP32 播放语音提示
       ESP_LOGW(TAG, "撬锁报警 (级别 %d)", param);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_TAMPER_ALERT);
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_DOOR_OPEN):
       event_name = "door_open";
-      // v2.7 协议升级：移除 HandleDoorNotClosed 调用，改为语音播报
+      // v2.8 协议升级：播放门未关闭语音提示
       // 屏幕仅显示摄像头画面，不显示警告弹窗
       ESP_LOGW(TAG, "门未关超时 (%d 分钟)", param);
-      // 播放语音提示（使用警告音效）
-      audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_DOOR_NOT_CLOSED);
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_LOW_BATTERY):
@@ -1180,25 +1180,63 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
   }
 
   case static_cast<uint8_t>(xiaozhi::RptType::RPT_UNLOCK): {
-    // 本地开锁日志：data[0]=方式, data[1]=用户ID, data[2]=结果
+    // 本地开锁日志：data[0]=方式, data[1]=用户ID/剩余锁定时间, data[2]=结果
     uint8_t method = msg.data[0];
-    uint8_t id = msg.data[1];
+    uint8_t d1 = msg.data[1];
     uint8_t result = msg.data[2];
-    ESP_LOGI(TAG, "开锁日志: 方式=%d, ID=%d, 结果=%d", method, id, result);
+    ESP_LOGI(TAG, "开锁日志: 方式=%d, D1=%d, 结果=%d", method, d1, result);
+
+    // 解析状态和相关字段
+    std::string status_str;
+    int uid = 0;
+    int fail_count = 0;
+    int lock_time = 0;
+
+    if (result == static_cast<uint8_t>(xiaozhi::UnlockResult::UNLOCK_SUCCESS)) {
+      // 开锁成功：D1=用户 ID
+      status_str = "success";
+      uid = d1;
+      ESP_LOGI(TAG, "开锁成功，用户 ID=%d", uid);
+    } else if (result ==
+               static_cast<uint8_t>(xiaozhi::UnlockResult::UNLOCK_LOCKED)) {
+      // 已锁定：D1=剩余锁定时间（分钟）
+      status_str = "locked";
+      lock_time = d1;
+      ESP_LOGW(TAG, "设备已锁定，剩余 %d 分钟", lock_time);
+      // 播放锁定语音
+      PlayLockedVoice(lock_time);
+    } else if (result >=
+                   static_cast<uint8_t>(xiaozhi::UnlockResult::UNLOCK_FAIL_1) &&
+               result <=
+                   static_cast<uint8_t>(xiaozhi::UnlockResult::UNLOCK_FAIL_5)) {
+      // 认证失败：D1=用户 ID（0xFF 表示无法识别），D2=失败次数
+      status_str = "fail";
+      uid = d1;
+      fail_count = result;
+      uint8_t remaining = xiaozhi::MAX_AUTH_FAIL_COUNT - fail_count;
+      ESP_LOGW(TAG, "认证失败，用户 ID=%d，已失败 %d 次，还剩 %d 次机会", uid,
+               fail_count, remaining);
+      // 播放失败语音
+      PlayAuthFailVoice(remaining);
+    } else {
+      // 未知结果
+      status_str = "fail";
+      uid = d1;
+      fail_count = result;
+      ESP_LOGW(TAG, "未知开锁结果: %d", result);
+    }
 
     // v5.0 协议：转发开锁日志到服务器
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
       std::string method_str = GetUnlockMethodString(method);
-      bool success = (result == 0);
-      int fail_count = success ? 0 : result;
-      protocol_->SendLogReport(method_str, id, success, fail_count);
+      protocol_->SendLogReport(method_str, status_str, uid, fail_count,
+                               lock_time);
     }
     break;
   }
 
   case static_cast<uint8_t>(xiaozhi::RptType::RPT_DOOR_OPENED): {
-    // v2.7 新增：开门日志（区分开锁命令和实际开门）
-    // data[0]=开锁方式, data[1]=开门来源（0x00=室外, 0x01=室内, 0xFF=未知）
+    // v2.6+ 开门日志：data[0]=开锁方式, data[1]=开门来源
     uint8_t method = msg.data[0];
     uint8_t source = msg.data[1];
 
@@ -1219,12 +1257,9 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
     ESP_LOGI(TAG, "开门日志: 方式=%s, 来源=%s", method_str.c_str(),
              source_str.c_str());
 
-    // v5.0 协议：上报开门日志到服务器（包含开门来源信息）
+    // v5.0 协议：上报开门日志到服务器
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
-      // 使用 SendLogReport 上报，将来源信息编码到 fail_count 字段
-      // 或者可以扩展协议添加专门的开门日志上报方法
-      // 这里暂时使用 SendLogReport，source 作为额外参数
-      protocol_->SendLogReport(method_str, source, true, 0);
+      protocol_->SendDoorOpenedReport(method_str, source_str);
     }
     break;
   }
@@ -1406,10 +1441,6 @@ void Application::HandleLockSystemMessage(const xiaozhi::LockMessage &msg) {
  * - 长流程命令（add）：收到最终结果（成功/失败/已存在/ID占用）后发送 ack
  */
 void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
-  if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
-    return;
-  }
-
   std::string category;
   std::string command;
   bool result = false;
@@ -1417,6 +1448,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
   std::string result_msg;
   bool is_final_result = false; // 是否为最终结果（用于两级确认）
   uint8_t uart_type = 0;        // 用于查找待处理命令
+  bool should_report = true;    // 是否需要上报服务器
 
   // 判断是指纹还是 NFC 反馈
   if (msg.type == static_cast<uint8_t>(xiaozhi::UserFpCmd::FP_RESP)) {
@@ -1425,11 +1457,20 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
     uint8_t status = msg.data[0];
 
     switch (status) {
-    case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_PRESS_FINGER):
-      ESP_LOGI(TAG, "指纹录入：请按手指 (第 %d 次)", msg.data[1]);
+    case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_PRESS_FINGER): {
+      // v2.8：播放指纹录入语音提示
+      uint8_t press_count = msg.data[1];
+      ESP_LOGI(TAG, "指纹录入：请按手指 (第 %d 次)", press_count);
+      if (press_count == 1) {
+        // audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS);
+      } else {
+        // audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS_AGAIN);
+      }
       return; // 中间状态，不上报，不发送 ack
+    }
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_LIFT_FINGER):
       ESP_LOGI(TAG, "指纹录入：请抬起手指");
+      // audio_service_.PlaySound(Lang::Sounds::OGG_FP_LIFT);
       return; // 中间状态，不上报，不发送 ack
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_SUCCESS):
       command = "add";
@@ -1438,6 +1479,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Success";
       is_final_result = true;
       ESP_LOGI(TAG, "指纹录入成功，ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_FAILED):
       command = "add";
@@ -1446,6 +1488,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Failed";
       is_final_result = true;
       ESP_LOGW(TAG, "指纹操作失败，错误码=0x%02X", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_COUNT_RESP):
       command = "query";
@@ -1463,6 +1506,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "AlreadyExists";
       is_final_result = true;
       ESP_LOGI(TAG, "指纹已存在，ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_ID_OCCUPIED):
       // v2.7 新增：指定 ID 被占用，返回新分配的 ID
@@ -1472,6 +1516,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "IdOccupied";
       is_final_result = true;
       ESP_LOGI(TAG, "指定 ID 被占用，新分配 ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
       break;
     default:
       ESP_LOGW(TAG, "未知指纹反馈状态: 0x%02X", status);
@@ -1482,25 +1527,37 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
     uart_type = static_cast<uint8_t>(xiaozhi::UserNfcCmd::NFC_CMD);
     uint8_t status = msg.data[0];
 
-    // NFC 反馈状态码与指纹相同
+    // v2.8：NFC 反馈状态码，包含中间状态
     switch (status) {
-    case 0x03: // 成功
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_TAP):
+      // 请刷卡（录入中）
+      ESP_LOGI(TAG, "NFC 录入：请刷卡");
+      // audio_service_.PlaySound(Lang::Sounds::OGG_NFC_TAP);
+      return; // 中间状态，不上报，不发送 ack
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_REMOVE_CARD):
+      // 请移开卡片
+      ESP_LOGI(TAG, "NFC 录入：请移开卡片");
+      // audio_service_.PlaySound(Lang::Sounds::OGG_NFC_REMOVE_CARD);
+      return; // 中间状态，不上报，不发送 ack
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_SUCCESS):
       command = "add";
       result = true;
       val = msg.data[1];
       result_msg = "Success";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 录入成功，ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
       break;
-    case 0x04: // 失败
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_FAILED):
       command = "add";
       result = false;
       val = msg.data[1];
       result_msg = "Failed";
       is_final_result = true;
       ESP_LOGW(TAG, "NFC 操作失败，错误码=0x%02X", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
       break;
-    case 0x05: // 数量
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_COUNT_RESP):
       command = "query";
       result = true;
       val = msg.data[1];
@@ -1508,21 +1565,23 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 数量：%d", val);
       break;
-    case 0x06: // v2.7 新增：已存在
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_ALREADY_EXISTS):
       command = "add";
       result = true;
       val = msg.data[1]; // 已存在的 ID
       result_msg = "AlreadyExists";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 已存在，ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
       break;
-    case 0x07: // v2.7 新增：ID 被占用
+    case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_ID_OCCUPIED):
       command = "add";
       result = true;
       val = msg.data[1]; // 新分配的 ID
       result_msg = "IdOccupied";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 指定 ID 被占用，新分配 ID=%d", val);
+      // audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
       break;
     default:
       ESP_LOGW(TAG, "未知 NFC 反馈状态: 0x%02X", status);
@@ -1534,14 +1593,16 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
   }
 
   // 上报结果到服务器
-  protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
+  if (should_report && protocol_ && protocol_->IsAudioChannelOpened()) {
+    protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
+  }
 
   // 两级确认机制：收到最终结果后发送 ack
   if (is_final_result && uart_type != 0) {
     auto it = pending_commands_.find(uart_type);
     if (it != pending_commands_.end()) {
       const PendingCommand &cmd = it->second;
-      if (!cmd.seq_id.empty()) {
+      if (!cmd.seq_id.empty() && protocol_) {
         // 根据结果确定 ack code
         int ack_code = result ? 0 : 10; // 成功=0，失败=10（内部错误）
         ESP_LOGI(TAG, "用户管理命令完成，发送 ack: seq_id=%s, code=%d",
@@ -1817,6 +1878,87 @@ void Application::HandleDoorNotClosed() {
 
   // 显示提示
   Alert("提示", "门未关严实", "door_open", "");
+}
+
+// ============================================================================
+// v2.8 协议：语音播放辅助方法
+// ============================================================================
+
+/**
+ * @brief 播放认证失败语音（拼接方式）
+ *
+ * 播放序列：前缀 + 数字 + 后缀
+ * 例如："认证失败，还剩" + "4" + "次机会"
+ *
+ * @param remaining 剩余尝试次数（1-4）
+ */
+void Application::PlayAuthFailVoice(uint8_t remaining) {
+  ESP_LOGI(TAG, "播放认证失败语音，剩余 %d 次机会", remaining);
+
+  // 播放前缀："认证失败，还剩"
+  // audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_PREFIX);
+
+  // 播放数字
+  PlayNumberVoice(remaining);
+
+  // 播放后缀："次机会"
+  // audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_SUFFIX);
+}
+
+/**
+ * @brief 播放设备锁定语音（拼接方式）
+ *
+ * 播放序列：前缀 + 数字 + 后缀
+ * 例如："设备已锁定，请" + "3" + "分钟后再试"
+ *
+ * @param lock_minutes 剩余锁定时间（分钟）
+ */
+void Application::PlayLockedVoice(uint8_t lock_minutes) {
+  ESP_LOGI(TAG, "播放设备锁定语音，剩余 %d 分钟", lock_minutes);
+
+  // 播放前缀："设备已锁定，请"
+  // audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_PREFIX);
+
+  // 播放数字
+  PlayNumberVoice(lock_minutes);
+
+  // 播放后缀："分钟后再试"
+  // audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_SUFFIX);
+}
+
+/**
+ * @brief 播放数字语音
+ *
+ * 支持 0-99 的数字播放：
+ * - 0-9: 直接播放对应数字
+ * - 10-99: 拆分为十位和个位分别播放
+ *
+ * @param number 要播放的数字（0-99）
+ */
+void Application::PlayNumberVoice(uint8_t number) {
+  if (number > 99) {
+    ESP_LOGW(TAG, "数字超出范围: %d", number);
+    return;
+  }
+
+  // 数字语音映射表
+  static const std::string_view *digit_sounds[] = {
+      &Lang::Sounds::OGG_0, &Lang::Sounds::OGG_1, &Lang::Sounds::OGG_2,
+      &Lang::Sounds::OGG_3, &Lang::Sounds::OGG_4, &Lang::Sounds::OGG_5,
+      &Lang::Sounds::OGG_6, &Lang::Sounds::OGG_7, &Lang::Sounds::OGG_8,
+      &Lang::Sounds::OGG_9};
+
+  if (number < 10) {
+    // 单个数字
+    audio_service_.PlaySound(*digit_sounds[number]);
+  } else {
+    // 两位数：先播放十位，再播放个位
+    uint8_t tens = number / 10;
+    uint8_t ones = number % 10;
+
+    audio_service_.PlaySound(*digit_sounds[tens]);
+    audio_service_.PlaySound(*digit_sounds[ones]);
+  }
 }
 
 // ============================================================================

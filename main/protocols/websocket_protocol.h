@@ -97,13 +97,22 @@ public:
 
   /**
    * @brief 发送开锁日志上报
-   * @param method     开锁方式
-   * @param uid        用户 ID
-   * @param result     是否成功
-   * @param fail_count 失败次数
+   * @param method     开锁方式（finger/nfc/pwd/remote/key/temp_pwd/face）
+   * @param status     状态（success/fail/locked）
+   * @param uid        用户 ID（成功时有效，失败时可能为 0xFF 表示无法识别）
+   * @param fail_count 失败次数（1-5，仅 fail 状态有效）
+   * @param lock_time  剩余锁定时间（分钟，仅 locked 状态有效）
    */
-  void SendLogReport(const std::string &method, int uid, bool result,
-                     int fail_count = 0) override;
+  void SendLogReport(const std::string &method, const std::string &status,
+                     int uid, int fail_count = 0, int lock_time = 0) override;
+
+  /**
+   * @brief 发送开门日志上报
+   * @param method 开锁方式（finger/nfc/pwd/remote/key/temp_pwd/face）
+   * @param source 开门来源（outside/inside/unknown）
+   */
+  void SendDoorOpenedReport(const std::string &method,
+                            const std::string &source);
 
   /** 发送心跳 */
   void SendHeartbeat() override;

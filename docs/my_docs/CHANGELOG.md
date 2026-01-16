@@ -1730,3 +1730,461 @@ Server                  ESP32                   STM32
 - `%lu` 对应 `unsigned long`，配合显式类型转换确保跨平台兼容性
 - 保持密码输出为 6 位零填充格式（如 "000123"、"123456"）
 
+
+
+---
+
+## 2026-01-16 (NFC 响应状态枚举独立 & 开锁结果码定义)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 新增 `NfcRespStatus` 枚举、`UnlockResult` 枚举和 `MAX_AUTH_FAIL_COUNT` 常量 |
+
+### 具体变更
+
+**FpRespStatus 枚举注释修正**
+- 位置: `FpRespStatus` 枚举定义前（第 257-259 行）
+- 变更: 移除注释中"同时适用于指纹和 NFC 响应"的说明
+- 说明: NFC 响应状态现在有独立的枚举定义
+
+**新增 NfcRespStatus 枚举**
+- 位置: `FpRespStatus` 枚举之后（第 271-282 行）
+- 功能: NFC 录入响应状态码
+- 枚举值:
+  - `NFC_TAP = 0x01` - 请刷卡（录入中）
+  - `NFC_TAP_AGAIN = 0x02` - 请再次刷卡
+  - `NFC_SUCCESS = 0x03` - 录入成功
+  - `NFC_FAILED = 0x04` - 录入失败
+  - `NFC_COUNT_RESP = 0x05` - 数量查询响应
+  - `NFC_ALREADY_EXISTS = 0x06` - 已存在（v2.7+）
+  - `NFC_ID_OCCUPIED = 0x07` - ID 被占用（v2.7+）
+
+**新增 UnlockResult 枚举**
+- 位置: `NfcRespStatus` 枚举之后（第 284-298 行）
+- 功能: 开锁结果码，用于 `RPT_UNLOCK` 消息的 D2 字段
+- 枚举值:
+  - `UNLOCK_SUCCESS = 0x00` - 开锁成功
+  - `UNLOCK_FAIL_1 ~ UNLOCK_FAIL_5` - 失败 1~5 次
+  - `UNLOCK_LOCKED = 0x06` - 已锁定（D1=剩余锁定时间，单位分钟）
+
+**新增 MAX_AUTH_FAIL_COUNT 常量**
+- 位置: `UnlockResult` 枚举之后（第 300 行）
+- 类型: `constexpr uint8_t`
+- 值: `5`
+- 说明: 最大连续失败次数，超过后触发设备锁定
+
+### 功能说明
+
+本次变更为协议定义优化，主要目的：
+1. 将 NFC 响应状态从指纹响应中分离，使协议定义更清晰
+2. 定义开锁结果码，支持认证失败计数和设备锁定状态
+3. 为认证失败语音提示和设备锁定功能提供协议支持
+
+### 协议对应
+
+参考 `docs/my_docs/语音资源清单.md` 中的认证失败与锁定类语音播放逻辑：
+- 认证失败时播放剩余次数提示
+- 设备锁定时播放锁定时间提示
+
+
+
+---
+
+## 2026-01-16 (开锁日志语音提示实现)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 在 `RPT_UNLOCK` 消息处理中实现认证失败和设备锁定的语音提示 |
+
+### 具体变更
+
+**修改位置**: `HandleLockReportMessage()` 函数，`RPT_UNLOCK` case 分支（约第 1180-1220 行）
+
+**1. 变量名语义化**
+- 变更: `id` → `id_or_lock_time`
+- 说明: D1 字段在不同结果下含义不同（用户ID 或 剩余锁定时间）
+
+**2. 新增 v2.8 协议语音提示逻辑**
+- 位置: 日志记录之后，服务器上报之前
+- 逻辑:
+  - `UNLOCK_SUCCESS`: 开锁成功，仅记录日志，无语音
+  - `UNLOCK_LOCKED`: 设备已锁定，调用 `PlayLockedVoice(lock_minutes)` 播放锁定语音
+  - `UNLOCK_FAIL_1 ~ UNLOCK_FAIL_5`: 认证失败，调用 `PlayAuthFailVoice(remaining)` 播放失败语音
+
+**3. 服务器上报逻辑优化**
+- 变更: 使用 `UnlockResult::UNLOCK_SUCCESS` 枚举替代硬编码 `0` 判断成功
+- 变更: `id` 参数改为 `id_or_lock_time`
+
+### 功能说明
+
+这是 v2.8 协议升级的一部分，实现开锁结果的语音提示功能：
+
+| 结果 | D2 值 | D1 含义 | 语音提示 |
+|------|-------|---------|----------|
+| 成功 | 0x00 | 用户ID | 无 |
+| 失败1~5次 | 0x01~0x05 | 用户ID | "认证失败，还剩 N 次机会" |
+| 已锁定 | 0x06 | 剩余分钟 | "设备已锁定，请 N 分钟后再试" |
+
+### 协议对应
+
+参考 `docs/my_docs/语音资源清单.md` 第二节"认证失败与锁定类"：
+- 认证失败语音：`auth_fail_prefix.ogg` + 数字 + `auth_fail_suffix.ogg`
+- 设备锁定语音：`locked_prefix.ogg` + 数字 + `locked_suffix.ogg`
+
+### 待实现
+
+需要在 `Application` 类中实现以下方法：
+- `PlayAuthFailVoice(uint8_t remaining)` - 播放认证失败语音
+- `PlayLockedVoice(uint8_t minutes)` - 播放设备锁定语音
+
+
+
+---
+
+## 2026-01-16 (HandleLockUserMessage 代码结构修复)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 修复 `HandleLockUserMessage()` 函数中 NFC 反馈处理的代码结构问题 |
+
+### 具体变更
+
+**修改位置**: `HandleLockUserMessage()` 函数，NFC 反馈处理末尾部分（约第 1588-1610 行）
+
+**1. 删除重复/错误代码**
+- 移除重复的 `protocol_->SendUserMgmtResult()` 调用
+- 移除格式混乱的大括号和 `default` 分支残留代码
+- 移除多余的 `else` 分支和函数末尾多余大括号
+
+**2. 修复两级确认机制代码结构**
+- 修正代码缩进，将两级确认逻辑正确嵌套在 NFC 反馈处理内部
+- 添加 `protocol_` 空指针检查：`!cmd.seq_id.empty() && protocol_`
+- 确保 `pending_commands_.erase(it)` 在正确的作用域内执行
+
+**修改前（问题代码）**:
+```cpp
+  is_final_result = true;
+  ESP_LOGI(TAG, "NFC 指定 ID 被占用，新分配 ID=%d", val);
+  break;
+default:
+  ESP_LOGW(TAG, "未知 NFC 反馈状态: 0x%02X", status);
+  return;
+}
+}
+else {
+  ESP_LOGW(TAG, "未知用户管理反馈类型: 0x%02X", msg.type);
+  return;
+}
+
+// 上报结果到服务器
+protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
+
+// 两级确认机制...
+```
+
+**修改后（正确代码）**:
+```cpp
+  if (should_report && protocol_ && protocol_->IsAudioChannelOpened()) {
+    protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
+  }
+
+  // 两级确认机制：收到最终结果后发送 ack
+  if (is_final_result && uart_type != 0) {
+    auto it = pending_commands_.find(uart_type);
+    if (it != pending_commands_.end()) {
+      const PendingCommand &cmd = it->second;
+      if (!cmd.seq_id.empty() && protocol_) {
+        // 根据结果确定 ack code
+        int ack_code = result ? 0 : 10; // 成功=0，失败=10（内部错误）
+        ESP_LOGI(TAG, "用户管理命令完成，发送 ack: seq_id=%s, code=%d",
+                 cmd.seq_id.c_str(), ack_code);
+        protocol_->SendAck(cmd.seq_id, ack_code, result_msg);
+      }
+      pending_commands_.erase(it);
+    }
+  }
+}
+```
+
+### 功能说明
+
+修复 `HandleLockUserMessage()` 函数中的代码结构问题：
+1. 清理因编辑错误导致的重复代码和格式混乱
+2. 确保两级确认机制在正确的作用域内执行
+3. 添加空指针检查，提高代码健壮性
+4. 修正代码缩进，提高可读性
+
+
+
+---
+
+## 2026-01-16 (v2.8 协议语音播放辅助方法)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 新增语音播放辅助方法，支持认证失败和设备锁定的语音拼接播放 |
+
+### 具体变更
+
+**新增 PlayAuthFailVoice() 方法**
+- 位置: `Application` 类，v5.0 协议区域之前（约第 1888-1900 行）
+- 功能: 播放认证失败语音（拼接方式）
+- 播放序列: 前缀 + 数字 + 后缀
+- 示例: "认证失败，还剩" + "4" + "次机会"
+
+**新增 PlayLockedVoice() 方法**
+- 位置: `Application` 类（约第 1908-1922 行）
+- 功能: 播放设备锁定语音（拼接方式）
+- 播放序列: 前缀 + 数字 + 后缀
+- 示例: "设备已锁定，请" + "3" + "分钟后再试"
+
+**新增 PlayNumberVoice() 方法**
+- 位置: `Application` 类（约第 1930-1959 行）
+- 功能: 播放数字语音（0-99）
+- 实现逻辑:
+  - 0-9: 直接播放对应数字音频
+  - 10-99: 拆分为十位和个位分别播放
+- 使用静态映射表 `digit_sounds[]` 关联 `Lang::Sounds::OGG_0` ~ `OGG_9`
+
+### 功能说明
+
+实现 v2.8 协议中认证失败和设备锁定的本地语音提示功能：
+
+1. **认证失败提示**: 当用户指纹/密码/NFC 认证失败时，播放剩余尝试次数
+2. **设备锁定提示**: 当连续认证失败导致设备锁定时，播放剩余锁定时间
+
+采用数字拼接方式节省 Flash 空间，复用现有的数字语音资源（0-9）。
+
+### 依赖资源
+
+需要在 `Lang::Sounds` 命名空间中定义以下常量（参考 `docs/my_docs/语音资源清单.md`）：
+- `OGG_AUTH_FAIL_PREFIX` - "认证失败，还剩"
+- `OGG_AUTH_FAIL_SUFFIX` - "次机会"
+- `OGG_LOCKED_PREFIX` - "设备已锁定，请"
+- `OGG_LOCKED_SUFFIX` - "分钟后再试"
+- `OGG_0` ~ `OGG_9` - 数字 0-9（已存在）
+
+
+
+---
+
+## 2026-01-16 (自定义语音播放临时禁用)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 注释掉所有自定义语音播放调用 |
+
+### 具体变更
+
+**事件处理语音禁用**
+- 位置: `HandleLockReportMessage()` 函数，事件上报处理分支
+- 变更:
+  - 注释 `OGG_TAMPER_ALERT` 播放（撬锁报警，第 1126 行）
+  - 注释 `OGG_DOOR_NOT_CLOSED` 播放（门未关闭，第 1134 行）
+
+**指纹录入语音禁用**
+- 位置: `HandleLockUserMessage()` 函数，指纹反馈处理分支
+- 变更:
+  - 注释 `OGG_FP_PRESS` 播放（请按手指，第 1457 行）
+  - 注释 `OGG_FP_PRESS_AGAIN` 播放（请再次按压，第 1459 行）
+  - 注释 `OGG_FP_LIFT` 播放（请抬起手指，第 1464 行）
+  - 注释 `OGG_ENROLL_SUCCESS` 播放（录入成功，第 1474 行）
+  - 注释 `OGG_ENROLL_FAIL` 播放（录入失败，第 1483 行）
+  - 注释 `OGG_ALREADY_EXISTS` 播放（已存在，第 1501 行）
+  - 注释 `OGG_ID_OCCUPIED` 播放（ID被占用，第 1511 行）
+
+**NFC 录入语音禁用**
+- 位置: `HandleLockUserMessage()` 函数，NFC 反馈处理分支
+- 变更:
+  - 注释 `OGG_NFC_TAP` 播放（请刷卡，第 1527 行）
+  - 注释 `OGG_NFC_TAP_AGAIN` 播放（请再次刷卡，第 1532 行）
+  - 注释 `OGG_ENROLL_SUCCESS` 播放（录入成功，第 1541 行）
+  - 注释 `OGG_ENROLL_FAIL` 播放（录入失败，第 1550 行）
+  - 注释 `OGG_ALREADY_EXISTS` 播放（已存在，第 1567 行）
+  - 注释 `OGG_ID_OCCUPIED` 播放（ID被占用，第 1576 行）
+
+**认证失败/锁定语音禁用**
+- 位置: `PlayAuthFailVoice()` 和 `PlayLockedVoice()` 函数
+- 变更:
+  - 注释 `OGG_AUTH_FAIL_PREFIX` 和 `OGG_AUTH_FAIL_SUFFIX` 播放（第 1891、1897 行）
+  - 注释 `OGG_LOCKED_PREFIX` 和 `OGG_LOCKED_SUFFIX` 播放（第 1912、1918 行）
+
+### 功能说明
+
+临时禁用所有自定义语音播放功能。原因：
+- 语音资源文件（`.ogg`）尚未添加到项目中
+- 避免编译时找不到资源常量或运行时播放失败
+
+### 恢复方法
+
+待语音资源文件添加完成后，取消注释以下文件中的 `audio_service_.PlaySound()` 调用：
+- `main/application.cc` 中所有被注释的 `PlaySound` 行
+
+### 涉及语音资源
+
+| 常量名 | 语音内容 | 状态 |
+|--------|----------|------|
+| `OGG_TAMPER_ALERT` | "检测到异常，请注意安全" | 待添加 |
+| `OGG_DOOR_NOT_CLOSED` | "门未关闭，请注意关门" | 待添加 |
+| `OGG_FP_PRESS` | "请按压手指" | 待添加 |
+| `OGG_FP_PRESS_AGAIN` | "请再次按压" | 待添加 |
+| `OGG_FP_LIFT` | "请抬起手指" | 待添加 |
+| `OGG_NFC_TAP` | "请刷卡" | 待添加 |
+| `OGG_NFC_TAP_AGAIN` | "请再次刷卡" | 待添加 |
+| `OGG_ENROLL_SUCCESS` | "录入成功" | 待添加 |
+| `OGG_ENROLL_FAIL` | "录入失败，请重试" | 待添加 |
+| `OGG_ALREADY_EXISTS` | "该特征已存在" | 待添加 |
+| `OGG_ID_OCCUPIED` | "指定编号已占用" | 待添加 |
+| `OGG_AUTH_FAIL_PREFIX` | "认证失败，还剩" | 待添加 |
+| `OGG_AUTH_FAIL_SUFFIX` | "次机会" | 待添加 |
+| `OGG_LOCKED_PREFIX` | "设备已锁定，请" | 待添加 |
+| `OGG_LOCKED_SUFFIX` | "分钟后再试" | 待添加 |
+
+
+
+---
+
+## 2026-01-16 (NFC 子命令枚举与响应状态修正)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/lock_control/lock_protocol.h` | 新增 `NfcSubCmd` 枚举，修正 `NfcRespStatus` 枚举值 |
+
+### 具体变更
+
+**新增 NfcSubCmd 枚举**
+- 位置: `NfcRespStatus` 枚举定义之前（约第 272-280 行）
+- 内容:
+  - `NFC_ENROLL = 0x01` - 录入
+  - `NFC_DELETE = 0x02` - 删除指定 ID
+  - `NFC_CLEAR = 0x03` - 清空全部
+  - `NFC_COUNT = 0x04` - 查询数量
+- 说明: 与 `FingerprintSubCmd` 枚举对应，定义 NFC 管理的子命令
+
+**NfcRespStatus 枚举值修正**
+- 位置: `NfcRespStatus` 枚举（约第 285 行）
+- 变更: `NFC_TAP_AGAIN = 0x02` → `NFC_REMOVE_CARD = 0x02`
+- 说明: 修正命名，`0x02` 状态码含义是"请移开卡片"而非"请再次刷卡"，与 STM32 协议文档 v2.8 保持一致
+
+### 功能说明
+
+1. **NfcSubCmd 枚举**: 补充 NFC 子命令定义，与指纹子命令 `FingerprintSubCmd` 对应，便于代码中使用类型安全的枚举值
+2. **NFC_REMOVE_CARD 修正**: 根据 STM32 协议文档 v2.8 第 4.4.B 节，NFC 录入反馈 `D0=0x02` 的含义是"请移开卡片"，而非"请再次刷卡"
+
+### 协议对应
+
+参考 `docs/my_docs/智能猫眼门锁系统-STM32端.md` 第 4.4.B 节：
+
+| D0 状态码 | 含义 |
+|-----------|------|
+| 0x01 | 请刷卡（录入中） |
+| 0x02 | 请移开卡片 |
+| 0x03 | 录入成功 |
+| 0x04 | 操作失败 |
+| 0x05 | 数量反馈 |
+| 0x06 | UID 已存在 |
+| 0x07 | ID 被占用 |
+
+
+---
+
+## 2026-01-16 (开锁日志上报协议优化)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 重构 `RPT_UNLOCK` 和 `RPT_DOOR_OPENED` 处理逻辑，优化服务器上报协议 |
+
+### 具体变更
+
+**RPT_UNLOCK 处理逻辑重构**
+- 位置: `HandleLockReportMessage()` 函数，`RPT_UNLOCK` case 分支（约第 1182-1230 行）
+- 变更:
+  - 变量重命名: `id_or_lock_time` → `d1`，语义更清晰
+  - 新增状态解析变量: `status_str`、`uid`、`fail_count`、`lock_time`
+  - 根据结果类型分别解析字段含义:
+    - 成功 (D2=0x00): `status_str="success"`, `uid=D1`
+    - 锁定 (D2=0x06): `status_str="locked"`, `lock_time=D1`
+    - 失败 (D2=0x01-0x05): `status_str="fail"`, `uid=D1`, `fail_count=D2`
+  - 修改 `SendLogReport()` 调用签名: `(method_str, status_str, uid, fail_count, lock_time)`
+
+**RPT_DOOR_OPENED 处理逻辑优化**
+- 位置: `HandleLockReportMessage()` 函数，`RPT_DOOR_OPENED` case 分支（约第 1232-1265 行）
+- 变更:
+  - 简化注释
+  - 将 `SendLogReport()` 替换为新方法 `SendDoorOpenedReport(method_str, source_str)`
+  - 语义更清晰，开门日志与开锁日志分离
+
+### 功能说明
+
+优化 v5.0 协议的开锁日志上报，区分三种状态并传递更完整的信息：
+
+| 状态 | status_str | uid | fail_count | lock_time |
+|------|------------|-----|------------|-----------|
+| 成功 | `"success"` | 用户ID | 0 | 0 |
+| 失败 | `"fail"` | 用户ID/0xFF | 失败次数 | 0 |
+| 锁定 | `"locked"` | 0 | 0 | 剩余分钟 |
+
+新增专用的开门日志上报方法 `SendDoorOpenedReport()`，与开锁日志分离，符合 v2.6+ 协议设计。
+
+### 协议对应
+
+参考 `docs/my_docs/智能猫眼门锁系统-STM32端.md` v2.8 版本：
+- `RPT_UNLOCK (0xA1)`: D2 字段扩展，支持失败次数和锁定状态
+- `RPT_DOOR_OPENED (0xA2)`: 独立的开门日志上报
+
+### 待实现
+
+需要在 `Protocol` 基类和 `WebsocketProtocol` 实现类中：
+1. 更新 `SendLogReport()` 方法签名
+2. 新增 `SendDoorOpenedReport()` 方法
+
+
+---
+
+## 2026-01-16 (NFC 录入状态枚举修正)
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `main/application.cc` | 修正 NFC 录入中间状态的枚举名称和提示信息 |
+
+### 具体变更
+
+**NFC 响应状态处理修正**
+- 位置: `HandleNfcResponse()` 函数，NFC 中间状态处理分支（约第 1534-1540 行）
+- 变更:
+  - 枚举名称: `NfcRespStatus::NFC_TAP_AGAIN` → `NfcRespStatus::NFC_REMOVE_CARD`
+  - 日志消息: `"NFC 录入：请再次刷卡"` → `"NFC 录入：请移开卡片"`
+  - 语音资源注释: `OGG_NFC_TAP_AGAIN` → `OGG_NFC_REMOVE_CARD`
+
+### 功能说明
+
+修正 NFC 录入流程中间状态的语义，使其更符合实际操作流程：
+
+| 原状态 | 修正后状态 | 说明 |
+|--------|------------|------|
+| `NFC_TAP_AGAIN` (请再次刷卡) | `NFC_REMOVE_CARD` (请移开卡片) | 录入过程中需要先移开卡片再重新刷卡 |
+
+NFC 录入完整流程：
+1. `NFC_TAP` (0x01): 请刷卡
+2. `NFC_REMOVE_CARD` (0x02): 请移开卡片
+3. `NFC_SUCCESS` (0x03): 录入成功
+
+### 协议对应
+
+需要同步更新 `main/lock_control/lock_protocol.h` 中的 `NfcRespStatus` 枚举定义，将 `NFC_TAP_AGAIN` 重命名为 `NFC_REMOVE_CARD`。

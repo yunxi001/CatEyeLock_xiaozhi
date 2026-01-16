@@ -345,31 +345,31 @@ bool LockControlService::FingerprintQueryCount() {
 // 用户管理 - NFC
 // ============================================================================
 
-bool LockControlService::NfcEnroll() {
+bool LockControlService::NfcEnroll(uint8_t expected_id) {
   return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
                      static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
-                     {static_cast<uint8_t>(FpSubCmd::FP_ENROLL),
-                      LOCK_PROTOCOL_EMPTY, LOCK_PROTOCOL_EMPTY});
+                     {static_cast<uint8_t>(NfcSubCmd::NFC_ENROLL), expected_id,
+                      LOCK_PROTOCOL_EMPTY});
 }
 
 bool LockControlService::NfcDelete(uint8_t id) {
   return SendMessage(
       static_cast<uint8_t>(MsgCategory::USER),
       static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
-      {static_cast<uint8_t>(FpSubCmd::FP_DELETE), id, LOCK_PROTOCOL_EMPTY});
+      {static_cast<uint8_t>(NfcSubCmd::NFC_DELETE), id, LOCK_PROTOCOL_EMPTY});
 }
 
 bool LockControlService::NfcClear() {
   return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
                      static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
-                     {static_cast<uint8_t>(FpSubCmd::FP_CLEAR),
+                     {static_cast<uint8_t>(NfcSubCmd::NFC_CLEAR),
                       LOCK_PROTOCOL_EMPTY, LOCK_PROTOCOL_EMPTY});
 }
 
 bool LockControlService::NfcQueryCount() {
   return SendMessage(static_cast<uint8_t>(MsgCategory::USER),
                      static_cast<uint8_t>(UserNfcCmd::NFC_CMD),
-                     {static_cast<uint8_t>(FpSubCmd::FP_COUNT),
+                     {static_cast<uint8_t>(NfcSubCmd::NFC_COUNT),
                       LOCK_PROTOCOL_EMPTY, LOCK_PROTOCOL_EMPTY});
 }
 

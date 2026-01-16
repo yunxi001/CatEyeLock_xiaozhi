@@ -557,17 +557,19 @@ void WebsocketProtocol::SendEventReport(const std::string &event, int param) {
   SendText(message);
 }
 
-void WebsocketProtocol::SendLogReport(const std::string &method, int uid,
-                                      bool result, int fail_count) {
+void WebsocketProtocol::SendLogReport(const std::string &method,
+                                      const std::string &status, int uid,
+                                      int fail_count, int lock_time) {
   cJSON *root = cJSON_CreateObject();
   cJSON_AddStringToObject(root, "type", "log_report");
   cJSON_AddNumberToObject(root, "ts", (double)(esp_timer_get_time() / 1000));
 
   cJSON *data = cJSON_CreateObject();
   cJSON_AddStringToObject(data, "method", method.c_str());
+  cJSON_AddStringToObject(data, "status", status.c_str());
   cJSON_AddNumberToObject(data, "uid", uid);
-  cJSON_AddBoolToObject(data, "result", result);
   cJSON_AddNumberToObject(data, "fail_count", fail_count);
+  cJSON_AddNumberToObject(data, "lock_time", lock_time);
   cJSON_AddItemToObject(root, "data", data);
 
   auto json_str = cJSON_PrintUnformatted(root);
@@ -575,8 +577,31 @@ void WebsocketProtocol::SendLogReport(const std::string &method, int uid,
   cJSON_free(json_str);
   cJSON_Delete(root);
 
-  ESP_LOGI(TAG, "发送开锁日志: method=%s, uid=%d, result=%s, fail_count=%d",
-           method.c_str(), uid, result ? "true" : "false", fail_count);
+  ESP_LOGI(TAG,
+           "发送开锁日志: method=%s, status=%s, uid=%d, fail_count=%d, "
+           "lock_time=%d",
+           method.c_str(), status.c_str(), uid, fail_count, lock_time);
+  SendText(message);
+}
+
+void WebsocketProtocol::SendDoorOpenedReport(const std::string &method,
+                                             const std::string &source) {
+  cJSON *root = cJSON_CreateObject();
+  cJSON_AddStringToObject(root, "type", "door_opened_report");
+  cJSON_AddNumberToObject(root, "ts", (double)(esp_timer_get_time() / 1000));
+
+  cJSON *data = cJSON_CreateObject();
+  cJSON_AddStringToObject(data, "method", method.c_str());
+  cJSON_AddStringToObject(data, "source", source.c_str());
+  cJSON_AddItemToObject(root, "data", data);
+
+  auto json_str = cJSON_PrintUnformatted(root);
+  std::string message(json_str);
+  cJSON_free(json_str);
+  cJSON_Delete(root);
+
+  ESP_LOGI(TAG, "发送开门日志: method=%s, source=%s", method.c_str(),
+           source.c_str());
   SendText(message);
 }
 
