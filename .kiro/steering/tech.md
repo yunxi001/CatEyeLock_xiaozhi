@@ -9,15 +9,6 @@ inclusion: always
 - CMake + Kconfig 配置系统
 - 目标芯片：ESP32-S3-N16R8（8MB PSRAM）
 
-### ESP-IDF 环境初始化
-执行任何 ESP-IDF 相关命令（如 `idf.py build`、`idf.py flash`、`idf.py menuconfig` 等）前，必须先运行以下命令进入开发环境：
-
-```powershell
-& 'c:\Users\yunxi\.kiro\extensions\espressif.esp-idf-extension-1.11.0-universal\export.ps1'
-```
-
-> ⚠️ 未执行此脚本时，`idf.py` 等命令将无法识别或执行失败。
-
 ## 编程语言与代码风格
 - **C++**：主要语言，遵循 Google C++ 代码风格
 - **C**：ESP-IDF 组件和底层驱动

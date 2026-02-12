@@ -1123,7 +1123,7 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
       // v2.8 协议升级：播放撬锁报警语音
       // STM32 负责蜂鸣器报警，ESP32 播放语音提示
       ESP_LOGW(TAG, "撬锁报警 (级别 %d)", param);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_TAMPER_ALERT);
+      audio_service_.PlaySound(Lang::Sounds::OGG_TAMPER_ALERT);
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_DOOR_OPEN):
@@ -1131,7 +1131,7 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
       // v2.8 协议升级：播放门未关闭语音提示
       // 屏幕仅显示摄像头画面，不显示警告弹窗
       ESP_LOGW(TAG, "门未关超时 (%d 分钟)", param);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_DOOR_NOT_CLOSED);
+      audio_service_.PlaySound(Lang::Sounds::OGG_DOOR_NOT_CLOSED);
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_LOW_BATTERY):
@@ -1462,15 +1462,15 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       uint8_t press_count = msg.data[1];
       ESP_LOGI(TAG, "指纹录入：请按手指 (第 %d 次)", press_count);
       if (press_count == 1) {
-        // audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS);
+        audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS);
       } else {
-        // audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS_AGAIN);
+        audio_service_.PlaySound(Lang::Sounds::OGG_FP_PRESS_AGAIN);
       }
       return; // 中间状态，不上报，不发送 ack
     }
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_LIFT_FINGER):
       ESP_LOGI(TAG, "指纹录入：请抬起手指");
-      // audio_service_.PlaySound(Lang::Sounds::OGG_FP_LIFT);
+      audio_service_.PlaySound(Lang::Sounds::OGG_FP_LIFT);
       return; // 中间状态，不上报，不发送 ack
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_SUCCESS):
       command = "add";
@@ -1479,7 +1479,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Success";
       is_final_result = true;
       ESP_LOGI(TAG, "指纹录入成功，ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_FAILED):
       command = "add";
@@ -1488,7 +1488,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Failed";
       is_final_result = true;
       ESP_LOGW(TAG, "指纹操作失败，错误码=0x%02X", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_COUNT_RESP):
       command = "query";
@@ -1506,7 +1506,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "AlreadyExists";
       is_final_result = true;
       ESP_LOGI(TAG, "指纹已存在，ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
       break;
     case static_cast<uint8_t>(xiaozhi::FpRespStatus::FP_ID_OCCUPIED):
       // v2.7 新增：指定 ID 被占用，返回新分配的 ID
@@ -1516,7 +1516,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "IdOccupied";
       is_final_result = true;
       ESP_LOGI(TAG, "指定 ID 被占用，新分配 ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
       break;
     default:
       ESP_LOGW(TAG, "未知指纹反馈状态: 0x%02X", status);
@@ -1532,12 +1532,12 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_TAP):
       // 请刷卡（录入中）
       ESP_LOGI(TAG, "NFC 录入：请刷卡");
-      // audio_service_.PlaySound(Lang::Sounds::OGG_NFC_TAP);
+      audio_service_.PlaySound(Lang::Sounds::OGG_NFC_TAP);
       return; // 中间状态，不上报，不发送 ack
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_REMOVE_CARD):
       // 请移开卡片
       ESP_LOGI(TAG, "NFC 录入：请移开卡片");
-      // audio_service_.PlaySound(Lang::Sounds::OGG_NFC_REMOVE_CARD);
+      audio_service_.PlaySound(Lang::Sounds::OGG_NFC_TAP_AGAIN);
       return; // 中间状态，不上报，不发送 ack
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_SUCCESS):
       command = "add";
@@ -1546,7 +1546,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Success";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 录入成功，ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_SUCCESS);
       break;
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_FAILED):
       command = "add";
@@ -1555,7 +1555,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "Failed";
       is_final_result = true;
       ESP_LOGW(TAG, "NFC 操作失败，错误码=0x%02X", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ENROLL_FAIL);
       break;
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_COUNT_RESP):
       command = "query";
@@ -1572,7 +1572,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "AlreadyExists";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 已存在，ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ALREADY_EXISTS);
       break;
     case static_cast<uint8_t>(xiaozhi::NfcRespStatus::NFC_ID_OCCUPIED):
       command = "add";
@@ -1581,7 +1581,7 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
       result_msg = "IdOccupied";
       is_final_result = true;
       ESP_LOGI(TAG, "NFC 指定 ID 被占用，新分配 ID=%d", val);
-      // audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
+      audio_service_.PlaySound(Lang::Sounds::OGG_ID_OCCUPIED);
       break;
     default:
       ESP_LOGW(TAG, "未知 NFC 反馈状态: 0x%02X", status);
@@ -1896,13 +1896,13 @@ void Application::PlayAuthFailVoice(uint8_t remaining) {
   ESP_LOGI(TAG, "播放认证失败语音，剩余 %d 次机会", remaining);
 
   // 播放前缀："认证失败，还剩"
-  // audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_PREFIX);
+  audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_PREFIX);
 
   // 播放数字
   PlayNumberVoice(remaining);
 
   // 播放后缀："次机会"
-  // audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_SUFFIX);
+  audio_service_.PlaySound(Lang::Sounds::OGG_AUTH_FAIL_SUFFIX);
 }
 
 /**
@@ -1917,13 +1917,13 @@ void Application::PlayLockedVoice(uint8_t lock_minutes) {
   ESP_LOGI(TAG, "播放设备锁定语音，剩余 %d 分钟", lock_minutes);
 
   // 播放前缀："设备已锁定，请"
-  // audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_PREFIX);
+  audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_PREFIX);
 
   // 播放数字
   PlayNumberVoice(lock_minutes);
 
   // 播放后缀："分钟后再试"
-  // audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_SUFFIX);
+  audio_service_.PlaySound(Lang::Sounds::OGG_LOCKED_SUFFIX);
 }
 
 /**
@@ -1987,17 +1987,15 @@ bool Application::HandleSmartLockJsonMessage(const cJSON *root,
 
   // -------------------------------------------------------------------------
   // 人脸识别结果（兼容旧版 face_recognition 和新版 face_result）
+  // 说明：face_result 是服务器主动推送的识别结果，不是用户命令
+  //       不需要 seq_id 和两级确认机制，开锁结果通过 log_report 上报
   // -------------------------------------------------------------------------
   if (strcmp(type, "face_recognition") == 0 ||
       strcmp(type, "face_result") == 0) {
-    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
-    std::string msg_id_str = cJSON_IsString(msg_id) ? msg_id->valuestring : "";
+    ESP_LOGI(TAG, "收到人脸识别结果");
 
-    Schedule([this, root_copy = cJSON_Duplicate(root, 1), msg_id_str]() {
-      // 发送 ACK 响应
-      if (!msg_id_str.empty()) {
-        protocol_->SendAck(msg_id_str, 0, "OK");
-      }
+    Schedule([this, root_copy = cJSON_Duplicate(root, 1)]() {
+      // 处理人脸识别结果
       HandleFaceRecognitionResult(root_copy);
       cJSON_Delete(root_copy);
     });
@@ -2323,6 +2321,90 @@ bool Application::HandleSmartLockJsonMessage(const cJSON *root,
         }
 
         cJSON_Delete(root_copy);
+      });
+    }
+    return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // 查询命令：sensors（传感器数据）、status（设备状态）
+  // v5.2 新增：支持服务器远程查询
+  // -------------------------------------------------------------------------
+  if (strcmp(type, "query") == 0) {
+    auto seq_id = cJSON_GetObjectItem(root, "seq_id");
+    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
+    auto command = cJSON_GetObjectItem(root, "command");
+    // 优先使用 seq_id，兼容旧版 msg_id
+    std::string seq_id_str = cJSON_IsString(seq_id)   ? seq_id->valuestring
+                             : cJSON_IsString(msg_id) ? msg_id->valuestring
+                                                      : "";
+
+    if (cJSON_IsString(command)) {
+      std::string cmd_str = command->valuestring;
+      ESP_LOGI(TAG, "查询命令: %s (seq_id=%s)", cmd_str.c_str(),
+               seq_id_str.c_str());
+
+      // 两级确认机制：立即发送 esp32_ack（第一级确认）
+      if (!seq_id_str.empty()) {
+        auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
+        if (ws_protocol) {
+          ws_protocol->SendEsp32Ack(seq_id_str, 0, "received");
+        }
+      }
+
+      Schedule([this, cmd = cmd_str, seq_id_str]() {
+        int ack_code = 0;
+        std::string ack_msg = "OK";
+
+        if (!lock_control_) {
+          ack_code = 6; // 硬件故障
+          ack_msg = "Lock control not available";
+          // 直接发送 ack
+          if (!seq_id_str.empty()) {
+            protocol_->SendAck(seq_id_str, ack_code, ack_msg);
+          }
+        } else {
+          // 确定 UART TYPE
+          uint8_t uart_type = 0;
+          if (cmd == "sensors") {
+            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_SENSORS);
+          } else if (cmd == "status") {
+            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_STATUS);
+          }
+
+          if (uart_type != 0) {
+            // 保存待处理命令（type = QUERY）
+            if (!seq_id_str.empty()) {
+              PendingCommand pending_cmd;
+              pending_cmd.seq_id = seq_id_str;
+              pending_cmd.type = PendingCommandType::QUERY;
+              pending_cmd.category = "query";
+              pending_cmd.command = cmd;
+              pending_cmd.uart_type = uart_type;
+              pending_cmd.uart_subtype = 0;
+              pending_cmd.timestamp_ms = esp_timer_get_time() / 1000;
+              pending_cmd.esp32_ack_sent = true;
+              pending_cmd.stm32_ack_received = false;
+              pending_cmd.stm32_error_code = 0;
+              pending_commands_[uart_type] = pending_cmd;
+            }
+
+            // 发送查询命令到 STM32
+            if (cmd == "sensors") {
+              lock_control_->QuerySensors();
+            } else if (cmd == "status") {
+              lock_control_->QueryStatus();
+            }
+            // ack 将在收到 STM32 数据帧（RPT_ENV/RPT_STATE）后发送
+          } else {
+            ack_code = 4; // 不支持
+            ack_msg = "Unknown query command";
+            // 未知命令，直接发送 ack
+            if (!seq_id_str.empty()) {
+              protocol_->SendAck(seq_id_str, ack_code, ack_msg);
+            }
+          }
+        }
       });
     }
     return true;
