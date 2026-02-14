@@ -139,7 +139,7 @@ void LockControlService::RxLoop() {
       if (found_header && pos > 0) {
         int64_t now = esp_timer_get_time() / 1000;
         if (now - last_byte_time > TIMEOUT_MS) {
-          ESP_LOGW(TAG, "接收超时，丢弃不完整消息 (pos=%zu)", pos);
+          ESP_LOGW(TAG, "接收超时，丢弃不完整消息 (pos=%u)", (unsigned)pos);
           pos = 0;
           found_header = false;
         }
@@ -161,7 +161,7 @@ void LockControlService::RxLoop() {
 
     // 缓冲区溢出保护
     if (pos >= LOCK_PROTOCOL_LENGTH) {
-      ESP_LOGE(TAG, "缓冲区溢出: pos=%zu", pos);
+      ESP_LOGE(TAG, "缓冲区溢出: pos=%u", (unsigned)pos);
       pos = 0;
       found_header = false;
       continue;

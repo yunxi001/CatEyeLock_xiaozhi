@@ -1108,14 +1108,14 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
     switch (event_id) {
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_DOORBELL):
       event_name = "bell";
-      ESP_LOGI(TAG, "门铃按下 - 触发人脸识别");
-      TriggerFaceRecognition();
+      ESP_LOGI(TAG, "门铃按下");
+      // 不再自动触发人脸识别，由服务器通过 MCP 调用 camera.take_photo
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_PIR):
       event_name = "pir_trigger";
-      ESP_LOGI(TAG, "PIR 检测到人体 (持续 %d 秒) - 触发人脸识别", param);
-      TriggerFaceRecognition();
+      ESP_LOGI(TAG, "PIR 检测到人体 (持续 %d 秒)", param);
+      // 不再自动触发人脸识别，由服务器通过 MCP 调用 camera.take_photo
       break;
 
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_TAMPER):
@@ -1690,12 +1690,13 @@ void Application::TriggerFaceRecognition() {
   size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
   const size_t MIN_FREE_MEMORY = 100 * 1024; // 最小 100KB
   if (free_psram < MIN_FREE_MEMORY) {
-    ESP_LOGW(TAG, "内存不足，拒绝人脸识别 (可用 PSRAM: %zu KB)",
-             free_psram / 1024);
+    ESP_LOGW(TAG, "内存不足，拒绝人脸识别 (可用 PSRAM: %u KB)",
+             (unsigned)(free_psram / 1024));
     face_recognition_in_progress_ = false;
     return;
   }
-  ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %zu KB)", free_psram / 1024);
+  ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %u KB)",
+           (unsigned)(free_psram / 1024));
 
   // 检查摄像头是否可用
   auto &board = Board::GetInstance();
@@ -1752,7 +1753,7 @@ void Application::TriggerFaceRecognition() {
   }
 
   int64_t encode_end = esp_timer_get_time();
-  ESP_LOGI(TAG, "JPEG 编码完成: %zu 字节 (耗时: %lld ms)", jpeg_size,
+  ESP_LOGI(TAG, "JPEG 编码完成: %u 字节 (耗时: %lld ms)", (unsigned)jpeg_size,
            (encode_end - capture_end) / 1000);
 
   // 发送人脸识别图像

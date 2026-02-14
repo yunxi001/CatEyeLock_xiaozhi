@@ -2935,3 +2935,120 @@ ffprobe -v error -show_format -show_streams fp_press.ogg
 
 **文档维护者**: 毕业设计项目组  
 **最后更新**: 2026-01-29
+
+## 2026-02-14 (日志格式化类型修复)
+
+### 修改文件
+
+| 文件                  | 修改内容                                               |
+| --------------------- | ------------------------------------------------------ |
+| `main/application.cc` | 修复 `TriggerFaceRecognition()` 函数中的日志格式化警告 |
+
+### 具体变更
+
+**内存检查日志格式化修复**
+
+- 位置: `TriggerFaceRecognition()` 函数，内存检查部分（第 1693 行和第 1698 行）
+- 变更:
+  - 格式化字符串从 `%zu` 改为 `%u`
+  - 添加类型转换 `(unsigned)(free_psram / 1024)`
+- 原代码:
+  ```cpp
+  ESP_LOGW(TAG, "内存不足，拒绝人脸识别 (可用 PSRAM: %zu KB)", free_psram / 1024);
+  ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %zu KB)", free_psram / 1024);
+  ```
+- 新代码:
+  ```cpp
+  ESP_LOGW(TAG, "内存不足，拒绝人脸识别 (可用 PSRAM: %u KB)", (unsigned)(free_psram / 1024));
+  ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %u KB)", (unsigned)(free_psram / 1024));
+  ```
+
+### 功能说明
+
+修复编译器类型警告，确保 `size_t` 类型的内存大小值在不同平台上正确格式化：
+
+- `%zu` 是 C99 标准的 `size_t` 格式化符，但在某些编译器配置下可能不支持
+- `%u` 对应 `unsigned int`，配合显式类型转换确保跨平台兼容性
+- 保持日志输出格式不变，仅修正类型匹配问题
+
+### 技术说明
+
+**类型转换原因**:
+
+- `size_t` 在不同平台上可能是 `unsigned int`、`unsigned long` 或 `unsigned long long`
+- 使用 `%zu` 需要编译器支持 C99 标准
+- 显式转换为 `unsigned` 并使用 `%u` 可确保在所有平台上正确编译
+
+**影响范围**:
+
+- 仅影响日志输出的类型匹配，不影响功能逻辑
+- 消除编译警告，提高代码质量
+
+### 相关代码
+
+| 位置                          | 说明                |
+| ----------------------------- | ------------------- |
+| `TriggerFaceRecognition()`    | 人脸识别触发函数    |
+| `heap_caps_get_free_size()`   | 获取可用 PSRAM 大小 |
+| `MIN_FREE_MEMORY` (100\*1024) | 最小可用内存阈值    |
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-02-14
+
+---
+
+## 2026-02-14 (JPEG 分块日志格式修正)
+
+### 修改文件
+
+| 文件                                 | 修改内容                       |
+| ------------------------------------ | ------------------------------ |
+| `main/boards/common/esp32_camera.cc` | 修正 JPEG 分块内存分配日志格式 |
+
+### 具体变更
+
+**修正日志格式化类型**
+
+- 位置: `CaptureJpegChunks()` 函数，内存分配失败日志（第 1001 行）
+- 变更:
+  - 格式化字符串从 `%zu` 改为 `%u`
+  - 添加类型转换 `(unsigned)len`
+- 原代码:
+  ```cpp
+  ESP_LOGE(TAG, "Failed to allocate %zu bytes for JPEG chunk", len);
+  ```
+- 新代码:
+  ```cpp
+  ESP_LOGE(TAG, "Failed to allocate %u bytes for JPEG chunk", (unsigned)len);
+  ```
+
+### 功能说明
+
+修复编译器类型警告，确保 `size_t` 类型的内存大小值在不同平台上正确格式化：
+
+- `%zu` 是 C99 标准的 `size_t` 格式化符，但在某些编译器配置下可能不支持
+- `%u` 对应 `unsigned int`，配合显式类型转换确保跨平台兼容性
+- 保持日志输出格式不变，仅修正类型匹配问题
+
+### 技术说明
+
+**类型转换原因**:
+
+- `size_t` 在不同平台上可能是 `unsigned int`、`unsigned long` 或 `unsigned long long`
+- 使用 `%zu` 需要编译器支持 C99 标准
+- 显式转换为 `unsigned` 并使用 `%u` 可确保在所有平台上正确编译
+
+**影响范围**:
+
+- 仅影响日志输出的类型匹配，不影响功能逻辑
+- 消除编译警告，提高代码质量
+
+### 相关代码
+
+| 位置                        | 说明                     |
+| --------------------------- | ------------------------ |
+| `CaptureJpegChunks()`       | JPEG 分块捕获函数        |
+| `heap_caps_aligned_alloc()` | PSRAM 对齐内存分配       |
+| `len`                       | 当前分块大小（`size_t`） |

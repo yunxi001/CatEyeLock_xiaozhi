@@ -117,7 +117,7 @@ bool Protocol::IsTimeout() const {
       now - last_incoming_time_);
   bool timeout = duration.count() > kTimeoutSeconds;
   if (timeout) {
-    ESP_LOGE(TAG, "Channel timeout %ld seconds", (long)duration.count());
+    ESP_LOGE(TAG, "Channel timeout %d seconds", (int)duration.count());
   }
   return timeout;
 }

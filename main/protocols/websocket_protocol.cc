@@ -148,8 +148,8 @@ bool WebsocketProtocol::SendVideo(const uint8_t *data, size_t size,
   bp2->payload_size = htonl(size);
   memcpy(bp2->payload, data, size);
 
-  ESP_LOGD(TAG, "发送视频帧: %dx%d, 大小=%zu, 时间戳=%u", width, height, size,
-           timestamp);
+  ESP_LOGD(TAG, "发送视频帧: %dx%d, 大小=%u, 时间戳=%u", width, height,
+           (unsigned)size, timestamp);
   return websocket_->Send(serialized.data(), serialized.size(), true);
 }
 
@@ -188,8 +188,8 @@ bool WebsocketProtocol::SendFaceRecognition(const uint8_t *jpeg_data,
   bp2->payload_size = htonl(jpeg_size);
   memcpy(bp2->payload, jpeg_data, jpeg_size);
 
-  ESP_LOGI(TAG, "发送人脸识别图像: %dx%d, 大小=%zu 字节", width, height,
-           jpeg_size);
+  ESP_LOGI(TAG, "发送人脸识别图像: %dx%d, 大小=%u 字节", width, height,
+           (unsigned)jpeg_size);
 
   bool success = websocket_->Send(serialized.data(), serialized.size(), true);
   if (!success) {
