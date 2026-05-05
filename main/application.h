@@ -156,6 +156,12 @@ public:
   void StopMonitorMode();
   /** @brief 检查是否处于监控模式。 */
   bool IsMonitorMode() const;
+  /** @brief 启动本地预览。 */
+  bool StartLocalPreview();
+  /** @brief 停止本地预览。 */
+  void StopLocalPreview();
+  /** @brief 检查本地预览是否活动。 */
+  bool IsLocalPreviewActive() const;
 
 private:
   /** @brief 私有构造函数，用于单例模式。 */
@@ -201,6 +207,12 @@ private:
   bool face_recognition_in_progress_ = false; // 人脸识别是否正在进行
   TaskHandle_t check_new_version_task_handle_ = nullptr; // 检查新版本任务的句柄
   TaskHandle_t main_event_loop_task_handle_ = nullptr;   // 主事件循环任务的句柄
+
+  // 本地预览相关成员变量
+  bool local_preview_active_ = false;           // 预览活动标志
+  TaskHandle_t preview_capture_task_ = nullptr; // 捕获任务句柄
+  TaskHandle_t preview_display_task_ = nullptr; // 显示任务句柄
+  QueueHandle_t preview_frame_queue_ = nullptr; // 帧队列句柄
 
   // v5.0 协议：状态数据缓存（用于状态上报）
   int last_battery_ = 0;     // 最后一次电量
@@ -315,6 +327,24 @@ private:
    * @return 超时时间（毫秒）
    */
   int64_t GetTimeoutForType(PendingCommandType type);
+
+  // =========================================================================
+  // 本地预览相关方法
+  // =========================================================================
+
+  /**
+   * @brief 预览捕获任务循环
+   *
+   * 以 15 FPS 频率捕获帧（66ms 间隔）
+   */
+  void PreviewCaptureLoop();
+
+  /**
+   * @brief 预览显示任务循环
+   *
+   * 从队列获取最新帧并更新显示
+   */
+  void PreviewDisplayLoop();
 };
 
 /**

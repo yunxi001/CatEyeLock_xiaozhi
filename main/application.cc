@@ -5,6 +5,8 @@
 #include "board.h"
 #include "display.h"
 #include "esp32_camera.h"
+#include "lcd_display.h"
+#include "local_preview/preview_frame.h"
 #include "mcp_server.h"
 #include "mqtt_protocol.h"
 #include "settings.h"
@@ -552,6 +554,79 @@ void Application::Start() {
           ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
         }
       }
+    } else if (strcmp(type->valuestring, "local_preview") == 0) {
+      // 本地预览命令处理
+      auto action = cJSON_GetObjectItem(root, "action");
+      if (cJSON_IsString(action)) {
+        ESP_LOGI(TAG, "本地预览命令: %s", action->valuestring);
+
+        if (strcmp(action->valuestring, "start") == 0) {
+          // 启动本地预览
+          Schedule([this]() {
+            bool success = StartLocalPreview();
+
+            // 构造响应 JSON
+            cJSON *response = cJSON_CreateObject();
+            cJSON_AddStringToObject(response, "type", "local_preview");
+            cJSON_AddStringToObject(response, "action", "start");
+
+            if (success) {
+              cJSON_AddStringToObject(response, "status", "success");
+              ESP_LOGI(TAG, "本地预览启动成功");
+            } else {
+              cJSON_AddStringToObject(response, "status", "error");
+
+              // 根据失败原因添加错误信息
+              const char *error_msg = "未知错误";
+              if (IsMonitorMode()) {
+                error_msg = "监控模式运行中";
+              } else if (face_recognition_in_progress_) {
+                error_msg = "人脸识别运行中";
+              } else {
+                auto *camera = Board::GetInstance().GetCamera();
+                if (!camera) {
+                  error_msg = "摄像头不可用";
+                }
+              }
+              cJSON_AddStringToObject(response, "error", error_msg);
+              ESP_LOGE(TAG, "本地预览启动失败: %s", error_msg);
+            }
+
+            // 发送响应
+            char *json_str = cJSON_PrintUnformatted(response);
+            if (json_str && protocol_) {
+              protocol_->SendMcpMessage(json_str);
+              cJSON_free(json_str);
+            }
+            cJSON_Delete(response);
+          });
+        } else if (strcmp(action->valuestring, "stop") == 0) {
+          // 停止本地预览
+          Schedule([this]() {
+            StopLocalPreview();
+
+            // 构造响应 JSON
+            cJSON *response = cJSON_CreateObject();
+            cJSON_AddStringToObject(response, "type", "local_preview");
+            cJSON_AddStringToObject(response, "action", "stop");
+            cJSON_AddStringToObject(response, "status", "success");
+
+            // 发送响应
+            char *json_str = cJSON_PrintUnformatted(response);
+            if (json_str && protocol_) {
+              protocol_->SendMcpMessage(json_str);
+              cJSON_free(json_str);
+            }
+            cJSON_Delete(response);
+
+            ESP_LOGI(TAG, "本地预览已停止");
+          });
+        } else {
+          ESP_LOGW(TAG, "未知的本地预览操作: %s", action->valuestring);
+        }
+      } else {
+        ESP_LOGW(TAG, "本地预览命令缺少 action 字段");
+      }
     } else if (HandleSmartLockJsonMessage(root, type->valuestring)) {
       // v5.0 协议：智能门锁扩展消息（face_result, lock_control, dev_control,
       // user_mgmt, heartbeat_ack） 已在 HandleSmartLockJsonMessage() 中处理
@@ -1009,6 +1084,14 @@ bool Application::StartMonitorMode() {
     return false;
   }
 
+  // 检查与本地预览的互斥
+  if (IsLocalPreviewActive()) {
+    ESP_LOGE(TAG, "无法启动监控模式：本地预览正在运行");
+    Alert("错误", "本地预览运行中", "circle_xmark",
+          Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
   if (!protocol_) {
     ESP_LOGE(TAG, "Protocol not initialized");
     return false;
@@ -1144,6 +1227,8 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
     case static_cast<uint8_t>(xiaozhi::EventId::EVT_LOCK_STATUS): {
       // v2.7 新增：关门/上锁状态事件
       // param (D1) 为状态码：0x00=门关闭, 0x01=上锁成功, 0x02=锁舌未到位报警
+      // 注意: STM32 v2.8+ 已移除霍尔传感器，不再发送 BOLT_ALARM 事件
+      // 保留此代码以兼容旧版 STM32 (v2.7-)
       xiaozhi::LockStatusCode status_code =
           static_cast<xiaozhi::LockStatusCode>(param);
 
@@ -1158,7 +1243,7 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
         break;
       case xiaozhi::LockStatusCode::BOLT_ALARM:
         event_name = "bolt_alarm";
-        ESP_LOGW(TAG, "锁舌未到位报警");
+        ESP_LOGW(TAG, "锁舌未到位报警 (仅旧版 STM32 v2.7-)");
         break;
       default:
         ESP_LOGW(TAG, "未知锁状态码: 0x%02X", param);
@@ -1672,6 +1757,14 @@ void Application::TriggerFaceRecognition() {
   // 检查是否已经在进行人脸识别（防止重复触发）
   if (face_recognition_in_progress_) {
     ESP_LOGW(TAG, "人脸识别正在进行中，忽略本次触发");
+    return;
+  }
+
+  // 检查与本地预览的互斥
+  if (IsLocalPreviewActive()) {
+    ESP_LOGE(TAG, "无法触发人脸识别：本地预览正在运行");
+    Alert("错误", "本地预览运行中", "circle_xmark",
+          Lang::Sounds::OGG_EXCLAMATION);
     return;
   }
 
@@ -2645,4 +2738,390 @@ void Application::CleanupPendingCommands() {
       pending_commands_.erase(it);
     }
   }
+}
+
+// ============================================================================
+// 本地预览功能
+// ============================================================================
+
+/**
+ * @brief 启动本地预览
+ *
+ * 执行以下操作：
+ * 1. 检查摄像头可用性
+ * 2. 检查与监控模式的互斥（IsMonitorMode()）
+ * 3. 检查与人脸识别的互斥（face_recognition_in_progress_）
+ * 4. 创建 FreeRTOS 队列（深度 1）
+ * 5. 创建 Capture Task（优先级 5，栈 4096）
+ * 6. 创建 Display Task（优先级 5，栈 4096）
+ * 7. 调用 EnterPreviewMode() 切换显示模式
+ * 8. 设置 local_preview_active_ 为 true
+ * 9. 播放确认音效
+ *
+ * @return bool 成功返回 true，失败返回 false
+ */
+bool Application::StartLocalPreview() {
+  ESP_LOGI(TAG, "启动本地预览");
+
+  // 1. 检查是否已经在运行
+  if (local_preview_active_) {
+    ESP_LOGW(TAG, "本地预览已在运行中");
+    return false;
+  }
+
+  // 2. 检查与监控模式的互斥
+  if (IsMonitorMode()) {
+    ESP_LOGE(TAG, "无法启动本地预览：监控模式正在运行");
+    Alert("错误", "监控模式运行中", "circle_xmark",
+          Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 3. 检查与人脸识别的互斥
+  if (face_recognition_in_progress_) {
+    ESP_LOGE(TAG, "无法启动本地预览：人脸识别正在进行");
+    Alert("错误", "人脸识别运行中", "circle_xmark",
+          Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 4. 检查摄像头可用性
+  auto &board = Board::GetInstance();
+  auto camera = board.GetCamera();
+  if (!camera) {
+    ESP_LOGE(TAG, "摄像头不可用");
+    Alert("错误", "摄像头不可用", "circle_xmark",
+          Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 5. 检查可用内存
+  size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const size_t MIN_FREE_MEMORY = 400 * 1024; // 最小 400KB
+  if (free_psram < MIN_FREE_MEMORY) {
+    ESP_LOGW(TAG, "内存不足，拒绝启动本地预览 (可用 PSRAM: %u KB)",
+             (unsigned)(free_psram / 1024));
+    Alert("错误", "内存不足", "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+  ESP_LOGI(TAG, "内存检查通过 (可用 PSRAM: %u KB)",
+           (unsigned)(free_psram / 1024));
+
+  // 6. 创建 FreeRTOS 队列（深度 1）
+  preview_frame_queue_ = xQueueCreate(1, sizeof(PreviewFrame *));
+  if (preview_frame_queue_ == nullptr) {
+    ESP_LOGE(TAG, "无法创建帧队列");
+    Alert("错误", "系统错误", "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 7. 创建 Capture Task（优先级 5，栈 4096）
+  BaseType_t ret = xTaskCreate(
+      [](void *param) {
+        Application *app = static_cast<Application *>(param);
+        app->PreviewCaptureLoop();
+        vTaskDelete(NULL);
+      },
+      "preview_capture", 4096, this, 5, &preview_capture_task_);
+
+  if (ret != pdPASS) {
+    ESP_LOGE(TAG, "无法创建捕获任务");
+    vQueueDelete(preview_frame_queue_);
+    preview_frame_queue_ = nullptr;
+    Alert("错误", "系统错误", "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 8. 创建 Display Task（优先级 5，栈 4096）
+  ret = xTaskCreate(
+      [](void *param) {
+        Application *app = static_cast<Application *>(param);
+        app->PreviewDisplayLoop();
+        vTaskDelete(NULL);
+      },
+      "preview_display", 4096, this, 5, &preview_display_task_);
+
+  if (ret != pdPASS) {
+    ESP_LOGE(TAG, "无法创建显示任务");
+    // 清理已创建的资源
+    local_preview_active_ = false;
+    vTaskDelete(preview_capture_task_);
+    preview_capture_task_ = nullptr;
+    vQueueDelete(preview_frame_queue_);
+    preview_frame_queue_ = nullptr;
+    Alert("错误", "系统错误", "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+    return false;
+  }
+
+  // 9. 切换显示模式
+  auto display = board.GetDisplay();
+  auto lcd_display = dynamic_cast<LcdDisplay *>(display);
+  if (lcd_display && !lcd_display->EnterPreviewMode()) {
+    ESP_LOGW(TAG, "无法进入预览模式，但继续运行");
+  }
+
+  // 10. 设置活动标志
+  local_preview_active_ = true;
+
+  // 11. 播放确认音效
+  ESP_LOGI(TAG, "本地预览已启动");
+  PlaySound(Lang::Sounds::OGG_SUCCESS);
+
+  return true;
+}
+
+/**
+ * @brief 停止本地预览
+ *
+ * 执行以下操作：
+ * 1. 设置 local_preview_active_ 为 false
+ * 2. 等待任务退出（延迟 200ms）
+ * 3. 清空队列并释放所有帧内存
+ * 4. 删除队列
+ * 5. 调用 ExitPreviewMode() 恢复显示模式
+ * 6. 播放确认音效
+ */
+void Application::StopLocalPreview() {
+  if (!local_preview_active_) {
+    ESP_LOGW(TAG, "本地预览未运行");
+    return;
+  }
+
+  ESP_LOGI(TAG, "停止本地预览");
+
+  // 1. 设置停止标志
+  local_preview_active_ = false;
+
+  // 2. 等待任务退出
+  if (preview_capture_task_ != nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+    preview_capture_task_ = nullptr;
+  }
+
+  if (preview_display_task_ != nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+    preview_display_task_ = nullptr;
+  }
+
+  // 3. 清空队列并释放所有帧内存
+  if (preview_frame_queue_ != nullptr) {
+    PreviewFrame *frame = nullptr;
+    while (xQueueReceive(preview_frame_queue_, &frame, 0) == pdTRUE) {
+      if (frame != nullptr) {
+        delete frame; // 析构函数会释放 PSRAM
+      }
+    }
+    // 4. 删除队列
+    vQueueDelete(preview_frame_queue_);
+    preview_frame_queue_ = nullptr;
+  }
+
+  // 5. 恢复显示模式
+  auto &board = Board::GetInstance();
+  auto display = board.GetDisplay();
+  auto lcd_display = dynamic_cast<LcdDisplay *>(display);
+  if (lcd_display) {
+    lcd_display->ExitPreviewMode();
+  }
+
+  // 6. 播放确认音效
+  ESP_LOGI(TAG, "本地预览已停止");
+  PlaySound(Lang::Sounds::OGG_SUCCESS);
+}
+
+/**
+ * @brief 检查本地预览是否活动
+ *
+ * @return bool 活动返回 true，否则返回 false
+ */
+bool Application::IsLocalPreviewActive() const { return local_preview_active_; }
+
+/**
+ * @brief 预览捕获任务循环
+ *
+ * 以 15 FPS 频率捕获帧（66ms 间隔）：
+ * 1. 调用 CaptureForPreview() 获取 RGB565 数据
+ * 2. 分配 PreviewFrame 对象并复制数据
+ * 3. 推送到 FreeRTOS 队列（非阻塞）
+ * 4. 队列满时丢弃旧帧并插入新帧
+ * 5. 添加连续失败检测和错误恢复
+ */
+void Application::PreviewCaptureLoop() {
+  ESP_LOGI(TAG, "预览捕获任务启动");
+
+  int consecutive_failures = 0;
+  const int MAX_FAILURES = 10;
+  const TickType_t FRAME_INTERVAL = pdMS_TO_TICKS(66); // 15 FPS
+
+  auto &board = Board::GetInstance();
+
+  while (local_preview_active_) {
+    TickType_t start_tick = xTaskGetTickCount();
+
+    auto camera = board.GetCamera();
+    auto esp32_camera = dynamic_cast<Esp32Camera *>(camera);
+
+    // 捕获帧
+    if (!esp32_camera || !esp32_camera->CaptureForPreview()) {
+      consecutive_failures++;
+      ESP_LOGW(TAG, "帧捕获失败 (%d/%d)", consecutive_failures, MAX_FAILURES);
+
+      // 连续失败过多，停止服务
+      if (consecutive_failures >= MAX_FAILURES) {
+        ESP_LOGE(TAG, "连续捕获失败过多 (%d 次)，停止预览", MAX_FAILURES);
+        Schedule([this]() {
+          StopLocalPreview();
+          Alert("错误", "摄像头异常", "circle_xmark",
+                Lang::Sounds::OGG_EXCLAMATION);
+        });
+        break;
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // 重置失败计数
+    consecutive_failures = 0;
+
+    // 获取帧数据
+    const uint8_t *rgb565_data = esp32_camera->GetRgb565Data();
+    size_t data_size = esp32_camera->GetRgb565DataSize();
+    uint16_t width = esp32_camera->GetFrameWidth();
+    uint16_t height = esp32_camera->GetFrameHeight();
+
+    if (rgb565_data == nullptr || data_size == 0) {
+      ESP_LOGW(TAG, "捕获的帧数据无效 (data=%p, size=%zu)", rgb565_data,
+               data_size);
+      vTaskDelay(FRAME_INTERVAL);
+      continue;
+    }
+
+    // 计算捕获耗时
+    TickType_t capture_end_tick = xTaskGetTickCount();
+    uint32_t capture_time_ms =
+        (capture_end_tick - start_tick) * portTICK_PERIOD_MS;
+
+    // DEBUG 日志：帧捕获详情
+    ESP_LOGD(TAG, "帧已捕获: %dx%d, 大小=%zu 字节, 耗时=%u ms, 时间戳=%u",
+             width, height, data_size, capture_time_ms,
+             (unsigned)capture_end_tick);
+
+    // 分配帧对象
+    PreviewFrame *frame = new (std::nothrow) PreviewFrame(width, height);
+
+    if (frame == nullptr || !frame->IsValid()) {
+      ESP_LOGE(TAG, "无法分配帧对象 (需要 %zu 字节)，停止预览", data_size);
+      if (frame != nullptr) {
+        delete frame;
+      }
+      Schedule([this]() {
+        StopLocalPreview();
+        Alert("错误", "内存不足", "circle_xmark",
+              Lang::Sounds::OGG_EXCLAMATION);
+      });
+      break;
+    }
+
+    // 复制数据
+    memcpy(frame->data, rgb565_data, data_size);
+    frame->timestamp = capture_end_tick;
+
+    // 发送到队列（非阻塞）
+    if (xQueueSend(preview_frame_queue_, &frame, 0) != pdTRUE) {
+      // 队列满，丢弃旧帧
+      ESP_LOGD(TAG, "队列已满，丢弃旧帧");
+      PreviewFrame *old_frame = nullptr;
+      if (xQueueReceive(preview_frame_queue_, &old_frame, 0) == pdTRUE) {
+        if (old_frame != nullptr) {
+          delete old_frame;
+        }
+      }
+      // 重新发送
+      if (xQueueSend(preview_frame_queue_, &frame, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "队列操作失败，丢弃当前帧");
+        delete frame;
+      }
+    }
+
+    // 控制帧率
+    TickType_t elapsed = xTaskGetTickCount() - start_tick;
+    if (elapsed < FRAME_INTERVAL) {
+      vTaskDelay(FRAME_INTERVAL - elapsed);
+    }
+  }
+
+  ESP_LOGI(TAG, "预览捕获任务退出");
+}
+
+/**
+ * @brief 预览显示任务循环
+ *
+ * 从队列获取最新帧并更新显示：
+ * 1. 从队列获取最新帧（超时 100ms）
+ * 2. 调用 UpdatePreviewCanvas() 更新显示
+ * 3. 释放帧内存
+ * 4. 添加错误处理（显示失败、队列超时等）
+ */
+void Application::PreviewDisplayLoop() {
+  ESP_LOGI(TAG, "预览显示任务启动");
+
+  auto &board = Board::GetInstance();
+  auto display = board.GetDisplay();
+  auto lcd_display = dynamic_cast<LcdDisplay *>(display);
+
+  if (!lcd_display) {
+    ESP_LOGE(TAG, "显示对象无效，退出显示任务");
+    return;
+  }
+
+  while (local_preview_active_) {
+    PreviewFrame *frame = nullptr;
+
+    TickType_t receive_start = xTaskGetTickCount();
+
+    // 从队列获取帧（超时 100ms）
+    if (xQueueReceive(preview_frame_queue_, &frame, pdMS_TO_TICKS(100)) !=
+        pdTRUE) {
+      // 队列超时，继续等待
+      ESP_LOGD(TAG, "队列超时，等待新帧");
+      continue;
+    }
+
+    if (frame == nullptr || !frame->IsValid()) {
+      ESP_LOGW(TAG, "收到无效帧 (frame=%p)", frame);
+      if (frame != nullptr) {
+        delete frame;
+      }
+      continue;
+    }
+
+    // 计算端到端延迟
+    TickType_t display_start = xTaskGetTickCount();
+    uint32_t latency_ms =
+        (display_start - frame->timestamp) * portTICK_PERIOD_MS;
+
+    // 更新 Canvas
+    TickType_t render_start = xTaskGetTickCount();
+    bool update_success = lcd_display->UpdatePreviewCanvas(
+        frame->data, frame->width, frame->height);
+    TickType_t render_end = xTaskGetTickCount();
+
+    uint32_t render_time_ms = (render_end - render_start) * portTICK_PERIOD_MS;
+    uint32_t total_time_ms = (render_end - receive_start) * portTICK_PERIOD_MS;
+
+    if (!update_success) {
+      ESP_LOGW(TAG, "更新 Canvas 失败 (尺寸=%dx%d)", frame->width,
+               frame->height);
+    } else {
+      // DEBUG 日志：帧显示详情
+      ESP_LOGD(TAG, "帧已显示: 渲染耗时=%u ms, 总耗时=%u ms, 端到端延迟=%u ms",
+               render_time_ms, total_time_ms, latency_ms);
+    }
+
+    // 释放帧内存
+    delete frame;
+  }
+
+  ESP_LOGI(TAG, "预览显示任务退出");
 }

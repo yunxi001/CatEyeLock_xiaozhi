@@ -175,11 +175,14 @@ enum class EventId : uint8_t {
  * @brief 锁状态码枚举（v2.7+）
  *
  * 用于 EVT_LOCK_STATUS 事件的 D1 字段
+ *
+ * @note STM32 v2.8+ 已移除霍尔传感器，不再发送 BOLT_ALARM 事件
+ *       保留此枚举值以兼容旧版 STM32 (v2.7-)
  */
 enum class LockStatusCode : uint8_t {
   DOOR_CLOSED = 0x00,  ///< 门关闭
   LOCK_SUCCESS = 0x01, ///< 上锁成功
-  BOLT_ALARM = 0x02,   ///< 锁舌未到位报警
+  BOLT_ALARM = 0x02,   ///< 锁舌未到位报警 (仅旧版 STM32 v2.7-)
 };
 
 /**

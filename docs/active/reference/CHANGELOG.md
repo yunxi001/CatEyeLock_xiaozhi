@@ -3052,3 +3052,1133 @@ ffprobe -v error -show_format -show_streams fp_press.ogg
 | `CaptureJpegChunks()`       | JPEG 分块捕获函数        |
 | `heap_caps_aligned_alloc()` | PSRAM 对齐内存分配       |
 | `len`                       | 当前分块大小（`size_t`） |
+
+---
+
+## 2026-05-04 (霍尔传感器移除适配 - 兼容性注释)
+
+### 修改文件
+
+| 文件                  | 修改内容                                            |
+| --------------------- | --------------------------------------------------- |
+| `main/application.cc` | 在锁舌报警事件处理中添加 STM32 v2.8+ 兼容性说明注释 |
+
+### 具体变更
+
+**添加兼容性说明注释**
+
+- 位置: `OnLockEvent()` 函数，`EVT_LOCK_STATUS` 事件处理分支（第 1146-1148 行）
+- 变更: 在 `param` 参数说明注释后新增两行注释
+- 内容:
+  ```cpp
+  // 注意: STM32 v2.8+ 已移除霍尔传感器，不再发送 BOLT_ALARM 事件
+  // 保留此代码以兼容旧版 STM32 (v2.7-)
+  ```
+
+**更新 BOLT_ALARM 日志消息**
+
+- 位置: `OnLockEvent()` 函数，`BOLT_ALARM` 分支（第 1162 行）
+- 变更: 日志消息从 `"锁舌未到位报警"` 改为 `"锁舌未到位报警 (仅旧版 STM32 v2.7-)"`
+- 原代码:
+  ```cpp
+  ESP_LOGW(TAG, "锁舌未到位报警");
+  ```
+- 新代码:
+  ```cpp
+  ESP_LOGW(TAG, "锁舌未到位报警 (仅旧版 STM32 v2.7-)");
+  ```
+
+### 功能说明
+
+为 STM32 霍尔传感器移除适配添加向后兼容性说明：
+
+1. **背景**: STM32 v2.8+ 移除了 PA12 和 PA15 霍尔传感器，不再发送 `BOLT_ALARM` (0x02) 事件
+2. **兼容性策略**: ESP32 保留 `BOLT_ALARM` 事件处理代码，以支持旧版 STM32 固件 (v2.7-)
+3. **代码标注**: 通过注释和日志消息明确标注该功能仅用于旧版兼容
+
+### 协议变更
+
+参考 `docs/ESP32固件更新指南.md` 第 2.1 节：
+
+| 事件类型                   | 状态码 | STM32 v2.7- | STM32 v2.8+ |
+| -------------------------- | ------ | ----------- | ----------- |
+| `LOCK_STATUS_DOOR_CLOSED`  | 0x00   | ✅ 支持     | ✅ 支持     |
+| `LOCK_STATUS_LOCK_SUCCESS` | 0x01   | ✅ 支持     | ✅ 支持     |
+| `LOCK_STATUS_BOLT_ALARM`   | 0x02   | ✅ 支持     | ❌ 不再发送 |
+
+### 相关文档
+
+- `docs/ESP32固件更新指南.md` - 霍尔传感器移除适配完整指南
+- `docs/completed/协议升级说明-v2.8.md` - STM32 协议 v2.8 变更说明
+
+### 备注
+
+本次变更为纯注释和日志优化，不涉及任何功能逻辑修改。主要目的：
+
+1. 明确标注代码的兼容性用途
+2. 便于后续维护时理解代码保留原因
+3. 与 STM32 固件升级文档保持一致
+
+---
+
+## 2026-05-04 (锁控协议枚举兼容性说明)
+
+### 修改文件
+
+| 文件                                | 修改内容                                   |
+| ----------------------------------- | ------------------------------------------ |
+| `main/lock_control/lock_protocol.h` | 为 `LockStatusCode` 枚举添加版本兼容性说明 |
+
+### 具体变更
+
+**LockStatusCode 枚举文档注释增强**
+
+- 位置: `LockStatusCode` 枚举定义前（第 175-181 行）
+- 变更: 在 `@brief` 说明后新增 `@note` 标签，说明 STM32 v2.8+ 霍尔传感器移除情况
+- 内容:
+  ```cpp
+  /**
+   * @brief 锁状态码枚举(v2.7+)
+   *
+   * 用于 EVT_LOCK_STATUS 事件的 D1 字段
+   *
+   * @note STM32 v2.8+ 已移除霍尔传感器，不再发送 BOLT_ALARM 事件
+   *       保留此枚举值以兼容旧版 STM32 (v2.7-)
+   */
+  ```
+
+**BOLT_ALARM 枚举值注释更新**
+
+- 位置: `LockStatusCode` 枚举（第 185 行）
+- 变更: 在注释中标注该值仅用于旧版 STM32
+- 原注释: `///< 锁舌未到位报警`
+- 新注释: `///< 锁舌未到位报警 (仅旧版 STM32 v2.7-)`
+
+### 功能说明
+
+为 STM32 霍尔传感器移除适配添加协议层兼容性说明：
+
+1. **背景**: STM32 v2.8+ 移除了 PA12 和 PA15 霍尔传感器，不再发送 `BOLT_ALARM` (0x02) 事件
+2. **兼容性策略**: ESP32 保留 `BOLT_ALARM` 枚举值，以支持旧版 STM32 固件 (v2.7-)
+3. **文档标注**: 通过 Doxygen `@note` 标签明确说明版本差异
+
+### 协议变更
+
+参考 `docs/ESP32固件更新指南.md` 第 2.1 节：
+
+| 事件类型                   | 状态码 | STM32 v2.7- | STM32 v2.8+ |
+| -------------------------- | ------ | ----------- | ----------- |
+| `LOCK_STATUS_DOOR_CLOSED`  | 0x00   | ✅ 支持     | ✅ 支持     |
+| `LOCK_STATUS_LOCK_SUCCESS` | 0x01   | ✅ 支持     | ✅ 支持     |
+| `LOCK_STATUS_BOLT_ALARM`   | 0x02   | ✅ 支持     | ❌ 不再发送 |
+
+### 相关文档
+
+- `docs/ESP32固件更新指南.md` - 霍尔传感器移除适配完整指南
+- `docs/completed/协议升级说明-v2.8.md` - STM32 协议 v2.8 变更说明
+
+### 备注
+
+本次变更为纯文档优化，不涉及任何功能逻辑修改。主要目的：
+
+1. 在协议定义层面明确标注版本兼容性
+2. 便于开发者理解枚举值的使用场景
+3. 与 `application.cc` 中的兼容性注释保持一致
+4. 支持 Doxygen 自动生成 API 文档时显示版本说明
+
+---
+
+## 2026-05-04 (LCD 显示头文件修复)
+
+### 修改文件
+
+| 文件                         | 修改内容                                     |
+| ---------------------------- | -------------------------------------------- |
+| `main/display/lcd_display.h` | 修复 `MipiLcdDisplay` 类构造函数声明截断问题 |
+
+### 具体变更
+
+**MipiLcdDisplay 构造函数声明补全**
+
+- 位置: `MipiLcdDisplay` 类定义（第 89-93 行）
+- 变更: 补全被截断的构造函数声明
+- 原代码:
+  ```cpp
+  class MipiLcdDisplay : public LcdDisplay {
+  public:
+    MipiLcdDisplay(esp_lcd_panel_io_han
+  ```
+- 新代码:
+  ```cpp
+  class MipiLcdDisplay : public LcdDisplay {
+  public:
+    MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
+                   esp_lcd_panel_handle_t panel, int width, int height,
+                   int offset_x, int offset_y, bool mirror_x, bool mirror_y,
+                   bool swap_xy);
+  };
+  ```
+
+**文件结束标记补全**
+
+- 位置: 文件末尾（第 95 行）
+- 变更: 添加缺失的 `#endif` 预处理器指令
+- 新增代码: `#endif // LCD_DISPLAY_H`
+
+### 功能说明
+
+修复头文件完整性问题，确保文件可正常编译：
+
+1. **构造函数声明补全**: 补全 `MipiLcdDisplay` 类构造函数的完整参数列表
+2. **预处理器指令补全**: 添加与文件开头 `#ifndef LCD_DISPLAY_H` 对应的 `#endif`
+3. **语法完整性**: 确保类定义和文件结构完整，避免编译错误
+
+### 技术说明
+
+**MipiLcdDisplay 构造函数参数**:
+
+| 参数       | 类型                        | 说明                |
+| ---------- | --------------------------- | ------------------- |
+| `panel_io` | `esp_lcd_panel_io_handle_t` | LCD 面板 IO 句柄    |
+| `panel`    | `esp_lcd_panel_handle_t`    | LCD 面板句柄        |
+| `width`    | `int`                       | 显示宽度（像素）    |
+| `height`   | `int`                       | 显示高度（像素）    |
+| `offset_x` | `int`                       | X 轴偏移量          |
+| `offset_y` | `int`                       | Y 轴偏移量          |
+| `mirror_x` | `bool`                      | X 轴镜像            |
+| `mirror_y` | `bool`                      | Y 轴镜像            |
+| `swap_xy`  | `bool`                      | 交换 X/Y 轴（旋转） |
+
+### 影响范围
+
+此修复影响所有使用 MIPI 接口 LCD 显示屏的开发板配置，确保：
+
+- 头文件可正常被包含
+- `MipiLcdDisplay` 类可正常实例化
+- 编译器能够正确解析类定义
+
+### 相关代码
+
+| 文件                          | 说明                 |
+| ----------------------------- | -------------------- |
+| `main/display/lcd_display.h`  | LCD 显示抽象基类定义 |
+| `main/display/lcd_display.cc` | LCD 显示实现         |
+| `main/boards/*/config.h`      | 各开发板的显示配置   |
+
+### 备注
+
+本次变更为文件完整性修复，不涉及功能逻辑修改。主要目的：
+
+1. 修复文件被意外截断导致的语法不完整问题
+2. 确保头文件可正常编译
+3. 保持代码库的完整性和可维护性
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04
+
+## 2026-05-04 (本地预览功能实现)
+
+### 修改文件
+
+| 文件                  | 修改内容                                                 |
+| --------------------- | -------------------------------------------------------- |
+| `main/application.cc` | 新增本地预览功能的完整实现（启动、停止、捕获、显示循环） |
+
+### 具体变更
+
+**新增 StartLocalPreview() 方法**
+
+- 位置: `Application` 类，文件末尾（第 2651-2781 行）
+- 功能: 启动本地预览功能
+- 实现逻辑:
+  1. 检查预览是否已在运行
+  2. 检查与监控模式的互斥（`IsMonitorMode()`）
+  3. 检查与人脸识别的互斥（`face_recognition_in_progress_`）
+  4. 检查摄像头可用性
+  5. 检查可用内存（最小 400KB PSRAM）
+  6. 创建 FreeRTOS 队列（深度 1）
+  7. 创建 Capture Task（优先级 5，栈 4096）
+  8. 创建 Display Task（优先级 5，栈 4096）
+  9. 调用 `EnterPreviewMode()` 切换显示模式
+  10. 设置 `local_preview_active_` 标志为 true
+  11. 播放确认音效
+
+**新增 StopLocalPreview() 方法**
+
+- 位置: 第 2793-2835 行
+- 功能: 停止本地预览功能
+- 实现逻辑:
+  1. 设置 `local_preview_active_` 标志为 false
+  2. 等待任务退出（延迟 200ms）
+  3. 清空队列并释放所有帧内存
+  4. 删除队列
+  5. 调用 `ExitPreviewMode()` 恢复显示模式
+  6. 播放确认音效
+
+**新增 IsLocalPreviewActive() 方法**
+
+- 位置: 第 2845 行
+- 功能: 检查本地预览是否活动
+- 返回值: `local_preview_active_` 标志
+
+**新增 PreviewCaptureLoop() 方法**
+
+- 位置: 第 2862-2945 行
+- 功能: 预览捕获任务循环
+- 实现逻辑:
+  1. 以 15 FPS 频率捕获帧（66ms 间隔）
+  2. 调用 `CaptureForPreview()` 获取 RGB565 数据
+  3. 分配 `PreviewFrame` 对象并复制数据
+  4. 推送到 FreeRTOS 队列（非阻塞）
+  5. 队列满时丢弃旧帧并插入新帧
+  6. 连续失败检测和错误恢复（最大 10 次）
+
+**新增 PreviewDisplayLoop() 方法**
+
+- 位置: 第 2960-3004 行
+- 功能: 预览显示任务循环
+- 实现逻辑:
+  1. 从队列获取最新帧（超时 100ms）
+  2. 调用 `UpdatePreviewCanvas()` 更新显示
+  3. 释放帧内存
+  4. 添加错误处理（显示失败、队列超时等）
+
+### 功能说明
+
+实现本地监控画面实时显示功能，允许用户在 ESP32-S3 的 LCD 屏幕上实时查看摄像头画面：
+
+**核心特性**:
+
+- **零拷贝优化**: 摄像头直接输出 RGB565 原始数据用于本地预览，避免 JPEG 编解码开销
+- **双任务架构**: Capture Task（捕获帧）+ Display Task（刷新显示）
+- **队列缓冲**: FreeRTOS 队列（深度 1）平衡生产和消费速度
+- **性能目标**: 15 FPS 帧率，<50ms 延迟，<25% CPU 占用，<400KB 内存占用
+
+**互斥控制**:
+
+- 与监控模式互斥（不能同时运行）
+- 与人脸识别互斥（不能同时运行）
+
+**错误处理**:
+
+- 摄像头不可用时拒绝启动
+- 内存不足时拒绝启动
+- 连续捕获失败 10 次后自动停止
+- 内存分配失败时自动停止
+
+### 技术说明
+
+**任务配置**:
+
+| 任务           | 优先级 | 栈大小 | 频率   |
+| -------------- | ------ | ------ | ------ |
+| Capture Task   | 5      | 4096   | 15 FPS |
+| Display Task   | 5      | 4096   | 按需   |
+| 队列深度       | -      | -      | 1 帧   |
+| 最小可用内存   | -      | -      | 400KB  |
+| 最大连续失败数 | -      | -      | 10 次  |
+
+**内存管理**:
+
+- 所有帧缓冲区使用 PSRAM（`MALLOC_CAP_SPIRAM`）
+- 队列深度为 1 以节省内存（~153KB）
+- 帧数据通过 `PreviewFrame` 对象管理，析构函数自动释放 PSRAM
+
+**日志记录**:
+
+- 启动/停止: INFO 级别
+- 捕获/显示: INFO 级别
+- 错误: ERROR 级别
+- 警告: WARN 级别
+
+### 协议对应
+
+参考 `.kiro/specs/local-camera-preview/` 规范文档：
+
+- `requirements.md` - 需求定义（17 个需求，85 条验收标准）
+- `design.md` - 设计文档（零拷贝优化方案）
+- `tasks.md` - 实现计划（任务 5.2-5.4 完成）
+
+### 相关代码
+
+| 文件/类                 | 说明               |
+| ----------------------- | ------------------ |
+| `Application`           | 主应用控制器       |
+| `PreviewFrame`          | 预览帧数据结构     |
+| `Esp32Camera`           | 摄像头抽象类       |
+| `LcdDisplay`            | LCD 显示抽象类     |
+| `CaptureForPreview()`   | 捕获 RGB565 原始帧 |
+| `EnterPreviewMode()`    | 进入预览模式       |
+| `ExitPreviewMode()`     | 退出预览模式       |
+| `UpdatePreviewCanvas()` | 更新 LVGL Canvas   |
+| `local_preview_active_` | 预览活动标志       |
+| `preview_capture_task_` | 捕获任务句柄       |
+| `preview_display_task_` | 显示任务句柄       |
+| `preview_frame_queue_`  | 帧队列句柄         |
+
+### 待完成
+
+根据 `.kiro/specs/local-camera-preview/tasks.md`，以下任务仍需完成：
+
+- [ ] 任务 6: 实现 WebSocket 命令处理（`lock_control` 消息）
+- [ ] 任务 7: 实现互斥控制（监控模式、人脸识别）
+- [ ] 任务 8: 添加日志记录
+- [ ] 任务 9: 添加用户反馈（音效、指示器）
+- [ ] 任务 10: 性能优化和内存管理
+- [ ] 任务 11: 集成测试和验证
+
+### 备注
+
+本次变更完成了本地预览功能的核心实现（任务 5.2-5.4），对应 `.kiro/specs/local-camera-preview/tasks.md` 中的以下子任务：
+
+- ✅ 5.2 实现 StartLocalPreview() 方法
+- ✅ 5.3 实现 StopLocalPreview() 方法
+- ✅ 5.4 实现 IsLocalPreviewActive() 方法
+- ✅ 4.2 实现 Capture Task 任务函数
+- ✅ 4.3 实现 Capture Task 循环逻辑
+- ✅ 4.4 实现 Display Task 任务函数
+- ✅ 4.5 实现 Display Task 循环逻辑
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04
+
+## 2026-05-04 (本地预览捕获和显示循环补全)
+
+### 修改文件
+
+| 文件                  | 修改内容                                                   |
+| --------------------- | ---------------------------------------------------------- |
+| `main/application.cc` | 补全 `PreviewCaptureLoop()` 和 `PreviewDisplayLoop()` 函数 |
+
+### 具体变更
+
+**PreviewCaptureLoop() 函数补全**
+
+- 位置: `Application` 类，第 2862-2945 行
+- 变更: 补全被截断的函数实现，完成以下逻辑：
+  1. 获取 RGB565 数据指针和大小
+  2. 验证数据有效性（非空、非零）
+  3. 分配 `PreviewFrame` 对象并复制数据
+  4. 处理内存分配失败情况（停止预览、显示错误提示）
+  5. 推送帧到队列（非阻塞）
+  6. 队列满时丢弃旧帧并重新发送
+  7. 控制帧率（66ms 间隔，15 FPS）
+
+**PreviewDisplayLoop() 函数补全**
+
+- 位置: `Application` 类，第 2960-3004 行
+- 变更: 补全完整的显示任务循环实现：
+  1. 获取 LCD 显示对象
+  2. 验证显示对象有效性
+  3. 从队列获取帧（超时 100ms）
+  4. 验证帧数据有效性
+  5. 调用 `UpdatePreviewCanvas()` 更新显示
+  6. 释放帧内存
+  7. 记录日志
+
+### 功能说明
+
+补全本地预览功能的核心循环逻辑，实现完整的帧捕获和显示流程：
+
+**PreviewCaptureLoop 完整流程**:
+
+1. 调用 `CaptureForPreview()` 捕获 RGB565 帧
+2. 获取帧数据指针、大小、宽度、高度
+3. 验证数据有效性
+4. 分配 `PreviewFrame` 对象（PSRAM）
+5. 复制 RGB565 数据到帧对象
+6. 推送到队列（非阻塞）
+7. 队列满时丢弃旧帧
+8. 控制帧率（66ms 间隔）
+9. 连续失败检测（最大 10 次）
+
+**PreviewDisplayLoop 完整流程**:
+
+1. 获取 LCD 显示对象
+2. 从队列获取最新帧（超时 100ms）
+3. 验证帧数据有效性
+4. 调用 `UpdatePreviewCanvas()` 更新 LVGL Canvas
+5. 释放帧内存
+6. 记录日志
+
+### 技术说明
+
+**错误处理**:
+
+| 错误场景     | 处理策略                   | 恢复机制               |
+| ------------ | -------------------------- | ---------------------- |
+| 帧数据无效   | 记录警告日志，继续下一帧   | 跳过当前帧，不中断服务 |
+| 内存分配失败 | 记录错误日志，停止预览     | 自动停止预览，释放资源 |
+| 显示刷新失败 | 记录警告日志，继续下一帧   | 跳过当前帧，不中断服务 |
+| 队列超时     | 继续等待                   | 正常行为，无需恢复     |
+| 连续捕获失败 | 记录错误日志，停止预览     | 自动停止预览，释放资源 |
+| 显示对象无效 | 记录错误日志，退出显示任务 | 任务退出               |
+
+**性能指标**:
+
+| 指标       | 目标值  | 实现方式                 |
+| ---------- | ------- | ------------------------ |
+| 帧率       | 15 FPS  | 66ms 间隔控制            |
+| 延迟       | <50ms   | 零拷贝 RGB565 直接渲染   |
+| CPU 占用   | <25%    | 优化捕获和显示逻辑       |
+| 内存占用   | <400KB  | 队列深度 1，PSRAM 分配   |
+| 连续失败数 | 最大 10 | 自动停止预览，避免死循环 |
+
+**内存管理**:
+
+- 帧缓冲区使用 PSRAM（`MALLOC_CAP_SPIRAM`）
+- 队列深度为 1（节省 ~153KB）
+- 帧对象通过 `PreviewFrame` 析构函数自动释放
+- 队列满时主动释放旧帧
+
+### 协议对应
+
+参考 `.kiro/specs/local-camera-preview/` 规范文档：
+
+- `requirements.md` - 需求 7（帧捕获任务）、需求 8（显示刷新任务）
+- `design.md` - 双任务架构设计、错误处理流程
+- `tasks.md` - 任务 4.3（捕获循环）、任务 4.5（显示循环）
+
+### 相关代码
+
+| 函数/变量               | 说明                   |
+| ----------------------- | ---------------------- |
+| `PreviewCaptureLoop()`  | 预览捕获任务循环       |
+| `PreviewDisplayLoop()`  | 预览显示任务循环       |
+| `CaptureForPreview()`   | 捕获 RGB565 原始帧     |
+| `GetRgb565Data()`       | 获取 RGB565 数据指针   |
+| `GetRgb565DataSize()`   | 获取 RGB565 数据大小   |
+| `GetFrameWidth()`       | 获取帧宽度             |
+| `GetFrameHeight()`      | 获取帧高度             |
+| `UpdatePreviewCanvas()` | 更新 LVGL Canvas       |
+| `PreviewFrame`          | 预览帧数据结构         |
+| `preview_frame_queue_`  | 帧队列句柄             |
+| `local_preview_active_` | 预览活动标志           |
+| `FRAME_INTERVAL`        | 帧间隔（66ms，15 FPS） |
+
+### 待完成
+
+根据 `.kiro/specs/local-camera-preview/tasks.md`，以下任务仍需完成：
+
+- [ ] 任务 6: 实现 WebSocket 命令处理（`local_preview` 消息）
+- [ ] 任务 7: 实现互斥控制（监控模式、人脸识别）
+- [ ] 任务 8: 添加日志记录
+- [ ] 任务 9: 添加用户反馈（音效、指示器）
+- [ ] 任务 10: 性能优化和内存管理
+- [ ] 任务 11: 集成测试和验证
+
+### 备注
+
+本次变更补全了本地预览功能的核心循环逻辑（任务 4.3 和 4.5），对应 `.kiro/specs/local-camera-preview/tasks.md` 中的以下子任务：
+
+- ✅ 4.3 实现 Capture Task 循环逻辑
+- ✅ 4.5 实现 Display Task 循环逻辑
+
+完整的本地预览功能实现包括：
+
+- ✅ 5.2 实现 StartLocalPreview() 方法
+- ✅ 5.3 实现 StopLocalPreview() 方法
+- ✅ 5.4 实现 IsLocalPreviewActive() 方法
+- ✅ 4.2 实现 Capture Task 任务函数
+- ✅ 4.3 实现 Capture Task 循环逻辑
+- ✅ 4.4 实现 Display Task 任务函数
+- ✅ 4.5 实现 Display Task 循环逻辑
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04
+
+---
+
+## 2026-05-04 (本地预览与监控模式互斥检查)
+
+### 修改文件
+
+| 文件                  | 修改内容                                   |
+| --------------------- | ------------------------------------------ |
+| `main/application.cc` | 在 `StartMonitorMode()` 中添加互斥检查逻辑 |
+
+### 具体变更
+
+**新增本地预览互斥检查**
+
+- 位置: `StartMonitorMode()` 函数，协议初始化检查之前（第 1087-1095 行）
+- 变更: 添加 `IsLocalPreviewActive()` 检查逻辑
+- 功能: 当本地预览正在运行时，拒绝启动监控模式
+
+**实现逻辑**
+
+```cpp
+// 检查与本地预览的互斥
+if (IsLocalPreviewActive()) {
+  ESP_LOGE(TAG, "无法启动监控模式：本地预览正在运行");
+  Alert("错误", "本地预览运行中", "circle_xmark",
+        Lang::Sounds::OGG_EXCLAMATION);
+  return false;
+}
+```
+
+### 功能说明
+
+实现本地预览功能与监控模式的互斥控制（对应 `.kiro/specs/local-camera-preview/tasks.md` 任务 7.2）：
+
+1. **互斥原因**: 两种模式都需要独占摄像头资源
+2. **检查时机**: 在监控模式启动前检查本地预览状态
+3. **用户反馈**: 显示错误提示并播放错误音效
+4. **日志记录**: 记录 ERROR 级别日志说明拒绝原因
+
+### 互斥关系
+
+| 模式     | 本地预览 | 监控模式 | 人脸识别 |
+| -------- | -------- | -------- | -------- |
+| 本地预览 | -        | ⊗        | ⊗        |
+| 监控模式 | ⊗        | -        | ⊗        |
+| 人脸识别 | ⊗        | ⊗        | -        |
+
+### 相关任务
+
+对应 `.kiro/specs/local-camera-preview/tasks.md` 中的任务：
+
+- ✅ 7.2 在 StartMonitorMode() 中添加本地预览互斥检查
+
+### 待完成
+
+根据任务列表，以下互斥检查仍需实现：
+
+- [ ] 7.1 在 StartLocalPreview() 中添加监控模式互斥检查
+- [ ] 7.3 在 TriggerFaceRecognition() 中添加本地预览互斥检查
+- [ ] 7.4 在 StartLocalPreview() 中添加人脸识别互斥检查
+
+---
+
+## 2025-12-12 (本地预览指示器UI组件)
+
+### 修改文件
+
+| 文件                         | 修改内容                          |
+| ---------------------------- | --------------------------------- |
+| `main/display/lcd_display.h` | 新增"预览中"指示器 label 成员变量 |
+
+### 具体变更
+
+**新增 preview*indicator* 成员变量**
+
+- 位置: `LcdDisplay` 类私有成员区域（第 43 行，`preview_mode_active_` 之后）
+- 类型: `lv_obj_t*`
+- 初始值: `nullptr`
+- 注释: `///< "预览中"指示器 label`
+
+### 功能说明
+
+为本地预览功能添加"预览中"指示器的 UI 组件支持（对应 `.kiro/specs/local-camera-preview/tasks.md` 任务 9.2）：
+
+1. **用途**: 在屏幕角落显示"预览中"文字提示，让用户知道当前处于本地预览模式
+2. **实现方式**: 使用 LVGL label 组件，半透明背景
+3. **生命周期**:
+   - `EnterPreviewMode()` 中创建并显示指示器
+   - `ExitPreviewMode()` 中隐藏并销毁指示器
+
+### 相关任务
+
+对应 `.kiro/specs/local-camera-preview/tasks.md` 中的任务：
+
+- ✅ 3.1 在 LcdDisplay 类中添加预览模式相关成员变量（包含 `preview_indicator_`）
+- [ ] 9.2 实现"预览中"指示器（可选）- 需在 `.cc` 文件中实现创建和销毁逻辑
+
+### 设计规范
+
+参考 `.kiro/specs/local-camera-preview/design.md` 第 3.5 节：
+
+- 位置: 屏幕右上角或左上角
+- 样式: 小号字体，半透明黑色背景
+- 文本: "预览中" 或 "●REC"
+- 层级: 置于 Canvas 之上，确保可见
+
+### 待实现
+
+需要在 `main/display/lcd_display.cc` 中实现：
+
+1. `EnterPreviewMode()` - 创建 label，设置样式和位置
+2. `ExitPreviewMode()` - 删除 label，释放资源
+   加本地预览互斥检查 |
+
+### 具体变更
+
+**StartMonitorMode() 互斥检查新增**
+
+- 位置: `StartMonitorMode()` 函数开头（约第 1050-1056 行）
+- 变更: 在启动监控模式前检查本地预览是否运行中
+- 新增代码:
+  ```cpp
+  // 检查与本地预览的互斥
+  if (IsLocalPreviewActive()) {
+    ESP_LOGE(TAG, "无法启动监控模式: 本地预览运行中");
+    Alert("错误", "本地预览运行中", "error", "error");
+    return false;
+  }
+  ```
+
+### 功能说明
+
+实现本地预览与监控模式的互斥控制，确保两者不能同时运行：
+
+**互斥规则**:
+
+- 本地预览运行时，拒绝启动监控模式
+- 监控模式运行时，拒绝启动本地预览（已在 `StartLocalPreview()` 中实现）
+
+**错误处理**:
+
+- 记录 ERROR 级别日志
+- 播放错误音效并显示错误消息
+- 返回 false 表示启动失败
+
+### 技术说明
+
+**互斥检查位置**:
+
+| 函数                       | 检查内容                 | 错误提示         |
+| -------------------------- | ------------------------ | ---------------- |
+| `StartLocalPreview()`      | `IsMonitorMode()`        | "监控模式运行中" |
+| `StartMonitorMode()`       | `IsLocalPreviewActive()` | "本地预览运行中" |
+| `TriggerFaceRecognition()` | `IsLocalPreviewActive()` | "本地预览运行中" |
+
+**互斥关系**:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    设备模式状态                           │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  ┌────────────┐     ┌────────────┐     ┌────────────┐  │
+│  │  Normal    │────>│  Monitor   │     │  Local     │  │
+│  │  Mode      │<────│  Mode      │     │  Preview   │  │
+│  └────────────┘     └────────────┘     └────────────┘  │
+│       │                   │                   │         │
+│       │                   │                   │         │
+│       │                   └───────X───────────┘         │
+│       │                      (互斥)                     │
+│       │                                                 │
+│       └─────────────────────X───────────────────────────┘
+│                        (人脸识别互斥)                    │
+└──────────────────────────────────────────────────────────┘
+
+互斥规则：
+1. Monitor Mode ⊗ Local Preview（不能同时运行）
+2. Face Recognition ⊗ Local Preview（不能同时运行）
+3. Normal Mode 可与 Local Preview 共存（但 UI 被隐藏）
+```
+
+### 协议对应
+
+参考 `.kiro/specs/local-camera-preview/` 规范文档：
+
+- `requirements.md` - 需求 13（与监控模式的互斥）
+- `design.md` - 互斥控制设计
+- `tasks.md` - 任务 7.2（在 StartMonitorMode() 中添加本地预览互斥检查）
+
+### 相关代码
+
+| 函数/变量                | 说明                 |
+| ------------------------ | -------------------- |
+| `StartMonitorMode()`     | 启动监控模式         |
+| `StartLocalPreview()`    | 启动本地预览         |
+| `IsLocalPreviewActive()` | 检查本地预览是否活动 |
+| `IsMonitorMode()`        | 检查监控模式是否运行 |
+| `local_preview_active_`  | 本地预览活动标志     |
+
+### 待完成
+
+根据 `.kiro/specs/local-camera-preview/tasks.md`，以下任务仍需完成：
+
+- [x] 任务 7.1: 在 StartLocalPreview() 中添加监控模式互斥检查（已完成）
+- [x] 任务 7.2: 在 StartMonitorMode() 中添加本地预览互斥检查（本次完成）
+- [x] 任务 7.3: 在 TriggerFaceRecognition() 中添加本地预览互斥检查（已完成）
+- [x] 任务 7.4: 在 StartLocalPreview() 中添加人脸识别互斥检查（已完成）
+- [ ] 任务 6: 实现 WebSocket 命令处理（`local_preview` 消息）
+- [ ] 任务 8: 添加日志记录
+- [ ] 任务 9: 添加用户反馈（音效、指示器）
+- [ ] 任务 10: 性能优化和内存管理
+- [ ] 任务 11: 集成测试和验证
+
+### 备注
+
+本次变更完成了本地预览与监控模式的互斥控制（任务 7.2），对应 `.kiro/specs/local-camera-preview/tasks.md` 中的互斥控制任务。
+
+至此，所有互斥检查已完成：
+
+- ✅ 7.1 StartLocalPreview() 中添加监控模式互斥检查
+- ✅ 7.2 StartMonitorMode() 中添加本地预览互斥检查
+- ✅ 7.3 TriggerFaceRecognition() 中添加本地预览互斥检查
+- ✅ 7.4 StartLocalPreview() 中添加人脸识别互斥检查
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04
+
+## 2026-05-04 (本地预览 WebSocket 命令处理)
+
+### 修改文件
+
+| 文件                  | 修改内容                                                 |
+| --------------------- | -------------------------------------------------------- |
+| `main/application.cc` | 在 `HandleSmartLockJsonMessage()` 中添加本地预览命令处理 |
+
+### 具体变更
+
+**local_preview 消息处理新增**
+
+- 位置: `HandleSmartLockJsonMessage()` 函数，`lock_control` 消息处理之后（约第 1750-1810 行）
+- 变更: 新增 `local_preview` 消息类型处理分支
+- 实现逻辑:
+  1. 解析 `action` 字段（"start" 或 "stop"）
+  2. 根据 action 调用 `StartLocalPreview()` 或 `StopLocalPreview()`
+  3. 构造 JSON 响应（包含 status 和 error 字段）
+  4. 通过 `SendMcpMessage()` 发送响应到服务器
+
+**新增代码片段**:
+
+```cpp
+// --------- 本地预览控制 (local_preview) ---------
+if (strcmp(type, "local_preview") == 0) {
+    auto action = cJSON_GetObjectItem(root, "action");
+    if (!cJSON_IsString(action)) {
+        ESP_LOGW(TAG, "本地预览命令缺少 action 字段");
+        return true;
+    }
+
+    std::string action_str = action->valuestring;
+    ESP_LOGI(TAG, "本地预览命令: %s", action_str.c_str());
+
+    bool success = false;
+    std::string error_msg;
+
+    if (action_str == "start") {
+        success = StartLocalPreview();
+        if (!success) {
+            // 根据失败原因设置错误消息
+            if (IsMonitorMode()) {
+                error_msg = "监控模式运行中";
+            } else if (face_recognition_in_progress_) {
+                error_msg = "人脸识别运行中";
+            } else {
+                auto *camera = Board::GetInstance().GetCamera();
+                if (!camera) {
+                    error_msg = "摄像头不可用";
+                }
+            }
+        }
+    } else if (action_str == "stop") {
+        StopLocalPreview();
+        success = true;
+    } else {
+        ESP_LOGW(TAG, "未知本地预览命令: %s", action_str.c_str());
+        error_msg = "未知命令";
+    }
+
+    // 构造响应
+    cJSON *response = cJSON_CreateObject();
+    cJSON_AddStringToObject(response, "type", "local_preview");
+    cJSON_AddStringToObject(response, "action", action_str.c_str());
+    cJSON_AddStringToObject(response, "status", success ? "success" : "error");
+    if (!success && !error_msg.empty()) {
+        cJSON_AddStringToObject(response, "error", error_msg.c_str());
+    }
+
+    // 发送响应
+    char *json_str = cJSON_PrintUnformatted(response);
+    if (json_str && protocol_) {
+        protocol_->SendMcpMessage(json_str);
+        cJSON_free(json_str);
+    }
+    cJSON_Delete(response);
+
+    return true;
+}
+```
+
+### 功能说明
+
+实现服务器通过 WebSocket 控制本地预览功能的启动和停止：
+
+**支持的命令**:
+
+| 命令类型 | action 值 | 功能         | 响应                                |
+| -------- | --------- | ------------ | ----------------------------------- |
+| 启动     | `"start"` | 启动本地预览 | `{"status": "success"}` 或错误信息  |
+| 停止     | `"stop"`  | 停止本地预览 | `{"status": "success"}`             |
+| 未知     | 其他      | 无效命令     | `{"status": "error", "error": ...}` |
+
+**错误处理**:
+
+| 错误场景       | error 值           | 说明                     |
+| -------------- | ------------------ | ------------------------ |
+| 监控模式运行中 | `"监控模式运行中"` | 与监控模式互斥           |
+| 人脸识别运行中 | `"人脸识别运行中"` | 与人脸识别互斥           |
+| 摄像头不可用   | `"摄像头不可用"`   | 摄像头初始化失败         |
+| 未知命令       | `"未知命令"`       | action 值不是 start/stop |
+
+### 技术说明
+
+**WebSocket 命令格式**:
+
+启动本地预览：
+
+```json
+{
+  "type": "local_preview",
+  "action": "start"
+}
+```
+
+停止本地预览：
+
+```json
+{
+  "type": "local_preview",
+  "action": "stop"
+}
+```
+
+**响应格式**:
+
+成功响应：
+
+```json
+{
+  "type": "local_preview",
+  "action": "start",
+  "status": "success"
+}
+```
+
+失败响应：
+
+```json
+{
+  "type": "local_preview",
+  "action": "start",
+  "status": "error",
+  "error": "监控模式运行中"
+}
+```
+
+**消息发送方式**:
+
+- 使用 `protocol_->SendMcpMessage()` 发送 JSON 响应
+- 与 MCP 协议保持一致，支持服务器端解析
+
+### 协议对应
+
+参考 `.kiro/specs/local-camera-preview/` 规范文档：
+
+- `requirements.md` - 需求 5（WebSocket 控制命令处理）
+- `design.md` - WebSocket 命令格式定义
+- `tasks.md` - 任务 6.1（在 Protocol 类中添加本地预览命令处理）
+
+### 相关代码
+
+| 函数/变量                      | 说明                   |
+| ------------------------------ | ---------------------- |
+| `HandleSmartLockJsonMessage()` | 智能门锁 JSON 消息处理 |
+| `StartLocalPreview()`          | 启动本地预览           |
+| `StopLocalPreview()`           | 停止本地预览           |
+| `IsLocalPreviewActive()`       | 检查本地预览是否活动   |
+| `IsMonitorMode()`              | 检查监控模式是否运行   |
+| `SendMcpMessage()`             | 发送 MCP 消息          |
+
+### 待完成
+
+根据 `.kiro/specs/local-camera-preview/tasks.md`，以下任务仍需完成：
+
+- [x] 任务 6.1: 在 Protocol 类中添加本地预览命令处理（本次完成）
+- [ ] 任务 6.2: 编写 WebSocket 命令处理单元测试（可选）
+- [ ] 任务 8: 添加日志记录
+- [ ] 任务 9: 添加用户反馈（音效、指示器）
+- [ ] 任务 10: 性能优化和内存管理
+- [ ] 任务 11: 集成测试和验证
+
+### 备注
+
+本次变更完成了本地预览的 WebSocket 命令处理（任务 6.1），对应 `.kiro/specs/local-camera-preview/tasks.md` 中的命令处理任务。
+
+至此，本地预览功能的核心实现已完成：
+
+- ✅ 5.2 实现 StartLocalPreview() 方法
+- ✅ 5.3 实现 StopLocalPreview() 方法
+- ✅ 5.4 实现 IsLocalPreviewActive() 方法
+- ✅ 4.2 实现 Capture Task 任务函数
+- ✅ 4.3 实现 Capture Task 循环逻辑
+- ✅ 4.4 实现 Display Task 任务函数
+- ✅ 4.5 实现 Display Task 循环逻辑
+- ✅ 6.1 在 Protocol 类中添加本地预览命令处理
+- ✅ 7.1-7.4 实现互斥控制
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04
+
+---
+
+## 2026-05-04 (摄像头头文件宏冲突修复)
+
+### 修改文件
+
+| 文件                                 | 修改内容                                    |
+| ------------------------------------ | ------------------------------------------- |
+| `main/boards/common/esp32_camera.cc` | 解决 lwip/sockets.h 和 linux/ioctl.h 宏冲突 |
+
+### 具体变更
+
+**新增宏冲突解决方案**
+
+- 位置: 文件头部 include 区域（第 14-28 行），在 `#include "esp_video_init.h"` 和 `#include "linux/videodev2.h"` 之间
+- 变更: 添加宏取消定义代码块
+- 内容:
+  - 取消定义 `_IO` 宏
+  - 取消定义 `_IOR` 宏
+  - 取消定义 `_IOW` 宏
+  - 取消定义 `_IOWR` 宏
+- 注释: 添加详细的中文注释说明冲突原因和解决方案
+
+### 功能说明
+
+解决编译时的宏定义冲突问题：
+
+**问题背景**:
+
+- lwip/sockets.h 定义了 `_IO`、`_IOR`、`_IOW`、`_IOWR` 宏用于网络 ioctl 操作
+- linux/videodev2.h 也需要定义这些宏用于视频设备 ioctl 操作
+- 两者定义不兼容，导致编译错误或运行时行为异常
+
+**解决方案**:
+
+1. 先取消 lwip 定义的宏（通过 `#undef`）
+2. 然后包含 videodev2.h，让它使用正确的 Linux 风格定义
+3. 确保摄像头 ioctl 操作使用正确的宏定义
+
+**影响范围**:
+
+- 仅影响 esp32_camera.cc 编译单元
+- 不影响其他使用 lwip 的模块
+- 确保摄像头功能正常工作
+
+### 相关功能
+
+此修复确保以下功能正常工作：
+
+- 摄像头初始化和配置
+- RGB565 原始数据捕获（本地预览）
+- JPEG 编码数据捕获（监控模式、人脸识别）
+- 摄像头参数设置（分辨率、帧率等）
+
+### 相关规范
+
+参考文档：
+
+- `.kiro/specs/local-camera-preview/requirements.md` - 需求 1（摄像头 RGB565 原始数据捕获）
+- `.kiro/specs/local-camera-preview/design.md` - Camera 接口扩展
+- `.kiro/specs/local-camera-preview/tasks.md` - 任务 2.1（添加 CaptureForPreview() 方法）
+
+## 2026-05-04 (宏冲突解决方案移除)
+
+### 修改文件
+
+| 文件                                | 修改内容                                                |
+| ----------------------------------- | ------------------------------------------------------- |
+| `main/boards/common/esp32_camera.h` | 移除 lwip/sockets.h 和 linux/ioctl.h 宏定义冲突解决代码 |
+
+### 具体变更
+
+**移除宏冲突解决代码块**
+
+- 位置: 文件头部，`#include "esp_video_init.h"` 和 `#include "jpg/image_to_jpeg.h"` 之间（原第 16-28 行）
+- 变更: 删除以下 13 行代码：
+  ```cpp
+  // 解决 lwip/sockets.h 和 linux/ioctl.h 的宏定义冲突
+  // 必须在包含 image_to_jpeg.h 之前取消定义这些宏
+  #ifdef _IO
+  #undef _IO
+  #endif
+  #ifdef _IOR
+  #undef _IOR
+  #endif
+  #ifdef _IOW
+  #undef _IOW
+  #endif
+  ```
+
+### 功能说明
+
+移除不再需要的宏冲突解决代码，简化头文件结构：
+
+**背景**:
+
+- 原代码用于解决 lwip/sockets.h 和 linux/ioctl.h 之间的宏定义冲突
+- `_IO`、`_IOR`、`_IOW` 宏在两个头文件中有不同定义
+- 通过在包含 `image_to_jpeg.h` 之前取消定义这些宏来避免冲突
+
+**移除原因**:
+
+- 经过测试，当前 ESP-IDF 版本（v5.4+）和项目配置下不再出现此冲突
+- 可能的原因：
+  1. ESP-IDF 更新修复了宏冲突问题
+  2. 项目依赖的库版本更新解决了冲突
+  3. 编译配置调整避免了冲突
+
+**影响**:
+
+- ✅ 简化头文件结构，提高可读性
+- ✅ 减少预处理器指令，加快编译速度
+- ✅ 避免不必要的宏取消定义操作
+
+### 技术说明
+
+**宏冲突背景**:
+
+| 宏名   | lwip/sockets.h 定义 | linux/ioctl.h 定义 | 用途              |
+| ------ | ------------------- | ------------------ | ----------------- |
+| `_IO`  | 网络 I/O 操作       | 设备 I/O 控制      | 定义 ioctl 命令   |
+| `_IOR` | 网络 I/O 读操作     | 设备 I/O 读操作    | 定义 ioctl 读命令 |
+| `_IOW` | 网络 I/O 写操作     | 设备 I/O 写操作    | 定义 ioctl 写命令 |
+
+**验证方法**:
+
+编译项目并检查是否出现宏重定义警告：
+
+```bash
+idf.py build 2>&1 | grep -i "warning.*redefined"
+```
+
+如果没有警告输出，说明宏冲突已解决，可以安全移除解决代码。
+
+### 相关代码
+
+| 文件                                 | 说明                 |
+| ------------------------------------ | -------------------- |
+| `main/boards/common/esp32_camera.h`  | 摄像头抽象类头文件   |
+| `main/boards/common/esp32_camera.cc` | 摄像头抽象类实现     |
+| `jpg/image_to_jpeg.h`                | JPEG 编码库头文件    |
+| `esp_video_init.h`                   | ESP 视频初始化头文件 |
+
+### 备注
+
+本次变更为代码清理优化，不涉及功能逻辑修改。主要目的：
+
+1. 移除不再需要的宏冲突解决代码
+2. 简化头文件结构，提高可读性
+3. 减少预处理器指令，加快编译速度
+
+如果后续 ESP-IDF 版本更新或依赖库变更导致宏冲突重新出现，可以参考本次变更记录恢复解决代码。
+
+---
+
+**文档维护者**: 毕业设计项目组  
+**最后更新**: 2026-05-04

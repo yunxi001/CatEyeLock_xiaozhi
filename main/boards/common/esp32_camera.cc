@@ -3,10 +3,14 @@
 #include <errno.h>
 #include <esp_heap_caps.h>
 #include <fcntl.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/param.h>
 #include <unistd.h>
+
+// 解决 lwip/sockets.h 和 linux/ioctl.h 的宏定义冲突
+// 必须先包含 linux/ioctl.h，让它的定义覆盖 lwip 的定义
+#include "linux/ioctl.h"
+#include <sys/ioctl.h>
 
 #include "esp_imgfx_color_convert.h"
 #include "esp_video_device.h"
@@ -1239,6 +1243,294 @@ bool Esp32Camera::CaptureForStream() {
   return true;
 }
 
+// 捕获一帧RGB565原始数据用于本地预览
+bool Esp32Camera::CaptureForPreview() {
+  TickType_t start_tick = xTaskGetTickCount();
+
+  // 等待之前的编码线程完成
+  if (encoder_thread_.joinable()) {
+    encoder_thread_.join();
+  }
+
+  // 检查摄像头是否可用
+  if (!streaming_on_ || video_fd_ < 0) {
+    ESP_LOGE(TAG, "摄像头不可用 (streaming_on=%d, video_fd=%d)", streaming_on_,
+             video_fd_);
+    return false;
+  }
+
+  // 只取出一帧图像（不像 Capture() 那样取3帧丢2帧）
+  struct v4l2_buffer buf = {};
+  buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  buf.memory = V4L2_MEMORY_MMAP;
+  if (ioctl(video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+    ESP_LOGE(TAG, "VIDIOC_DQBUF 失败: %s", strerror(errno));
+    return false;
+  }
+
+  TickType_t dqbuf_tick = xTaskGetTickCount();
+
+  // 保存帧副本到PSRAM
+  if (frame_.data) {
+    heap_caps_free(frame_.data);
+    frame_.data = nullptr;
+    frame_.format = 0;
+  }
+  frame_.len = buf.bytesused;
+  frame_.data = (uint8_t *)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM |
+                                                            MALLOC_CAP_8BIT);
+  if (!frame_.data) {
+    ESP_LOGE(TAG, "分配帧缓冲区失败: 需要 %d 字节", buf.bytesused);
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+      ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+    }
+    return false;
+  }
+
+  // 根据传感器格式处理图像数据
+  // 对于本地预览，我们需要确保输出RGB565格式
+  switch (sensor_format_) {
+  case V4L2_PIX_FMT_RGB565:
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
+  {
+    auto src16 = (uint16_t *)mmap_buffers_[buf.index].start;
+    auto dst16 = (uint16_t *)frame_.data;
+    size_t count = (size_t)mmap_buffers_[buf.index].length / 2;
+    for (size_t i = 0; i < count; i++) {
+      dst16[i] = __builtin_bswap16(src16[i]);
+    }
+  }
+#else
+    memcpy(frame_.data, mmap_buffers_[buf.index].start,
+           MIN(mmap_buffers_[buf.index].length, frame_.len));
+#endif
+    frame_.format = V4L2_PIX_FMT_RGB565;
+    break;
+
+  case V4L2_PIX_FMT_RGB565X: {
+    // 大端序的 RGB565 需要转换为小端序
+    auto src16 = (uint16_t *)mmap_buffers_[buf.index].start;
+    auto dst16 = (uint16_t *)frame_.data;
+    size_t pixel_count = (size_t)frame_.width * (size_t)frame_.height;
+    for (size_t i = 0; i < pixel_count; i++) {
+      dst16[i] = __builtin_bswap16(src16[i]);
+    }
+    frame_.format = V4L2_PIX_FMT_RGB565;
+    break;
+  }
+
+  case V4L2_PIX_FMT_YUYV:
+  case V4L2_PIX_FMT_YUV422P: {
+    // YUV格式需要转换为RGB565
+    // 首先复制原始数据
+    uint8_t *yuv_data = (uint8_t *)heap_caps_malloc(
+        frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!yuv_data) {
+      ESP_LOGE(TAG, "分配YUV临时缓冲区失败");
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
+    {
+      auto src16 = (uint16_t *)mmap_buffers_[buf.index].start;
+      auto dst16 = (uint16_t *)yuv_data;
+      size_t count = (size_t)mmap_buffers_[buf.index].length / 2;
+      for (size_t i = 0; i < count; i++) {
+        dst16[i] = __builtin_bswap16(src16[i]);
+      }
+    }
+#else
+    memcpy(yuv_data, mmap_buffers_[buf.index].start,
+           MIN(mmap_buffers_[buf.index].length, frame_.len));
+#endif
+
+    // 转换YUV到RGB565
+    size_t rgb565_size = frame_.width * frame_.height * 2;
+    heap_caps_free(frame_.data);
+    frame_.data = (uint8_t *)heap_caps_malloc(rgb565_size, MALLOC_CAP_SPIRAM |
+                                                               MALLOC_CAP_8BIT);
+    if (!frame_.data) {
+      ESP_LOGE(TAG, "分配RGB565缓冲区失败");
+      heap_caps_free(yuv_data);
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    esp_imgfx_color_convert_cfg_t convert_cfg = {
+        .in_res = {.width = static_cast<int16_t>(frame_.width),
+                   .height = static_cast<int16_t>(frame_.height)},
+        .in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_YUYV,
+        .out_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB565_LE,
+        .color_space_std = ESP_IMGFX_COLOR_SPACE_STD_BT601,
+    };
+    esp_imgfx_color_convert_handle_t convert_handle = nullptr;
+    esp_imgfx_err_t err =
+        esp_imgfx_color_convert_open(&convert_cfg, &convert_handle);
+    if (err != ESP_IMGFX_ERR_OK || convert_handle == nullptr) {
+      ESP_LOGE(TAG, "esp_imgfx_color_convert_open 失败");
+      heap_caps_free(yuv_data);
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    esp_imgfx_data_t convert_input_data = {
+        .data = yuv_data,
+        .data_len = static_cast<uint32_t>(frame_.len),
+    };
+    esp_imgfx_data_t convert_output_data = {
+        .data = frame_.data,
+        .data_len = static_cast<uint32_t>(rgb565_size),
+    };
+    err = esp_imgfx_color_convert_process(convert_handle, &convert_input_data,
+                                          &convert_output_data);
+    esp_imgfx_color_convert_close(convert_handle);
+    heap_caps_free(yuv_data);
+
+    if (err != ESP_IMGFX_ERR_OK) {
+      ESP_LOGE(TAG, "esp_imgfx_color_convert_process 失败");
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    frame_.len = rgb565_size;
+    frame_.format = V4L2_PIX_FMT_RGB565;
+    break;
+  }
+
+  case V4L2_PIX_FMT_RGB24: {
+    // RGB24格式需要转换为RGB565
+    uint8_t *rgb24_data = (uint8_t *)heap_caps_malloc(
+        frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!rgb24_data) {
+      ESP_LOGE(TAG, "分配RGB24临时缓冲区失败");
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+#ifdef CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP
+    {
+      auto src16 = (uint16_t *)mmap_buffers_[buf.index].start;
+      auto dst16 = (uint16_t *)rgb24_data;
+      size_t count = (size_t)mmap_buffers_[buf.index].length / 2;
+      for (size_t i = 0; i < count; i++) {
+        dst16[i] = __builtin_bswap16(src16[i]);
+      }
+    }
+#else
+    memcpy(rgb24_data, mmap_buffers_[buf.index].start,
+           MIN(mmap_buffers_[buf.index].length, frame_.len));
+#endif
+
+    // 转换RGB24到RGB565
+    size_t rgb565_size = frame_.width * frame_.height * 2;
+    heap_caps_free(frame_.data);
+    frame_.data = (uint8_t *)heap_caps_malloc(rgb565_size, MALLOC_CAP_SPIRAM |
+                                                               MALLOC_CAP_8BIT);
+    if (!frame_.data) {
+      ESP_LOGE(TAG, "分配RGB565缓冲区失败");
+      heap_caps_free(rgb24_data);
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    esp_imgfx_color_convert_cfg_t convert_cfg = {
+        .in_res = {.width = static_cast<int16_t>(frame_.width),
+                   .height = static_cast<int16_t>(frame_.height)},
+        .in_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB888,
+        .out_pixel_fmt = ESP_IMGFX_PIXEL_FMT_RGB565_LE,
+    };
+    esp_imgfx_color_convert_handle_t convert_handle = nullptr;
+    esp_imgfx_err_t err =
+        esp_imgfx_color_convert_open(&convert_cfg, &convert_handle);
+    if (err != ESP_IMGFX_ERR_OK || convert_handle == nullptr) {
+      ESP_LOGE(TAG, "esp_imgfx_color_convert_open 失败");
+      heap_caps_free(rgb24_data);
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    esp_imgfx_data_t convert_input_data = {
+        .data = rgb24_data,
+        .data_len = static_cast<uint32_t>(frame_.len),
+    };
+    esp_imgfx_data_t convert_output_data = {
+        .data = frame_.data,
+        .data_len = static_cast<uint32_t>(rgb565_size),
+    };
+    err = esp_imgfx_color_convert_process(convert_handle, &convert_input_data,
+                                          &convert_output_data);
+    esp_imgfx_color_convert_close(convert_handle);
+    heap_caps_free(rgb24_data);
+
+    if (err != ESP_IMGFX_ERR_OK) {
+      ESP_LOGE(TAG, "esp_imgfx_color_convert_process 失败");
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    frame_.len = rgb565_size;
+    frame_.format = V4L2_PIX_FMT_RGB565;
+    break;
+  }
+
+  default:
+    ESP_LOGE(TAG, "不支持的传感器格式用于本地预览: 0x%08x", sensor_format_);
+    heap_caps_free(frame_.data);
+    frame_.data = nullptr;
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+      ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+    }
+    return false;
+  }
+
+  // 将缓冲区重新放入队列
+  if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+    ESP_LOGE(TAG, "VIDIOC_QBUF 失败");
+  }
+
+  TickType_t end_tick = xTaskGetTickCount();
+
+  // DEBUG 日志：捕获性能详情
+  uint32_t dqbuf_time_ms = (dqbuf_tick - start_tick) * portTICK_PERIOD_MS;
+  uint32_t total_time_ms = (end_tick - start_tick) * portTICK_PERIOD_MS;
+  ESP_LOGD(TAG,
+           "捕获预览帧成功: %dx%d, 格式=RGB565, 大小=%zu 字节, DQBUF耗时=%u "
+           "ms, 总耗时=%u ms",
+           frame_.width, frame_.height, frame_.len, dqbuf_time_ms,
+           total_time_ms);
+
+  return true;
+}
+
 // 捕获JPEG图像
 bool Esp32Camera::CaptureJpeg(uint8_t **jpeg_data, size_t *jpeg_size,
                               int quality) {
@@ -1300,4 +1592,24 @@ bool Esp32Camera::CaptureJpeg(uint8_t **jpeg_data, size_t *jpeg_size,
 // 检查摄像头是否可用
 bool Esp32Camera::IsAvailable() const {
   return streaming_on_ && video_fd_ >= 0;
+}
+
+// 获取当前帧的RGB565数据指针
+const uint8_t *Esp32Camera::GetRgb565Data() const {
+  // 检查数据有效性
+  if (!frame_.data || frame_.format != V4L2_PIX_FMT_RGB565) {
+    ESP_LOGW(TAG, "RGB565数据不可用: data=%p, format=0x%08x", frame_.data,
+             frame_.format);
+    return nullptr;
+  }
+  return frame_.data;
+}
+
+// 获取当前帧的RGB565数据大小
+size_t Esp32Camera::GetRgb565DataSize() const {
+  // 检查数据有效性
+  if (!frame_.data || frame_.format != V4L2_PIX_FMT_RGB565) {
+    return 0;
+  }
+  return frame_.len;
 }
