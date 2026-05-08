@@ -20,17 +20,13 @@
 
 #include "protocol.h"
 
-#include <deque>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
-#include <set>
 #include <web_socket.h>
 
 /** 服务器 Hello 消息接收事件位 */
 #define WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
 
-/** msg_id 防重放缓存大小 */
-constexpr size_t MSG_ID_CACHE_SIZE = 100;
 
 /**
  * @brief WebSocket 协议实现类
@@ -61,22 +57,12 @@ public:
   // =========================================================================
 
   /**
-   * @brief 发送 ACK 响应（第二级确认：命令执行完成）
-   * @param seq_id 消息序列号
-   * @param code   响应码（0=成功）
-   * @param msg    响应消息
+   * @brief 发送 ACK 响应（命令执行完成）
+   * @param code 响应码（0=成功）
+   * @param msg  响应消息
    */
-  void SendAck(const std::string &seq_id, int code = 0,
-               const std::string &msg = "OK") override;
+  void SendAck(int code, const std::string &msg) override;
 
-  /**
-   * @brief 发送 esp32_ack 响应（第一级确认：命令已收到）
-   * @param seq_id 消息序列号
-   * @param code   响应码（默认 0）
-   * @param msg    响应消息（默认 "received"）
-   */
-  void SendEsp32Ack(const std::string &seq_id, int code = 0,
-                    const std::string &msg = "received");
 
   /**
    * @brief 发送状态上报
@@ -114,8 +100,6 @@ public:
   void SendDoorOpenedReport(const std::string &method,
                             const std::string &source);
 
-  /** 发送心跳 */
-  void SendHeartbeat() override;
 
   /**
    * @brief 发送用户管理结果上报
@@ -129,23 +113,12 @@ public:
                           const std::string &command, bool result, int val,
                           const std::string &msg) override;
 
-  /**
-   * @brief 发送密码上报
-   * @param password 密码值（0-999999）
-   *
-   * 发送 JSON 消息：type="password_report", ts, data.password
-   * 密码格式化为 6 位零填充字符串
-   */
-  void SendPasswordReport(uint32_t password);
 
 private:
   EventGroupHandle_t event_group_handle_; ///< FreeRTOS 事件组句柄
   std::unique_ptr<WebSocket> websocket_;  ///< WebSocket 连接对象
   int version_ = 1;                       ///< 协议版本
 
-  // msg_id 防重放缓存
-  std::deque<std::string> msg_id_queue_; ///< FIFO 队列，用于淘汰旧 ID
-  std::set<std::string> msg_id_set_;     ///< 集合，用于快速查找
 
   /**
    * @brief 解析服务器 Hello 消息
@@ -166,18 +139,7 @@ private:
    */
   std::string GetHelloMessage();
 
-  /**
-   * @brief 检查 msg_id 是否重复
-   * @param msg_id 消息 ID
-   * @return 重复返回 true
-   */
-  bool IsDuplicateMsgId(const std::string &msg_id);
 
-  /**
-   * @brief 添加 msg_id 到缓存
-   * @param msg_id 消息 ID
-   */
-  void AddMsgIdToCache(const std::string &msg_id);
 };
 
 #endif

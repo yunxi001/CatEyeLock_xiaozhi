@@ -126,8 +126,7 @@ bool Protocol::IsTimeout() const {
 // v5.0 协议扩展方法默认实现
 // ============================================================================
 
-void Protocol::SendAck(const std::string &msg_id, int code,
-                       const std::string &msg) {
+void Protocol::SendAck(int code, const std::string &msg) {
   ESP_LOGW(TAG, "SendAck not implemented in base class");
 }
 
@@ -149,10 +148,6 @@ void Protocol::SendLogReport(const std::string &method,
 void Protocol::SendDoorOpenedReport(const std::string &method,
                                     const std::string &source) {
   ESP_LOGW(TAG, "SendDoorOpenedReport not implemented in base class");
-}
-
-void Protocol::SendHeartbeat() {
-  ESP_LOGW(TAG, "SendHeartbeat not implemented in base class");
 }
 
 void Protocol::SendUserMgmtResult(const std::string &category,

@@ -21,7 +21,6 @@
 
 // C++ 标准库
 #include <deque>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,40 +43,6 @@
 #define MAIN_EVENT_CHECK_NEW_VERSION_DONE (1 << 5) // 检查新版本完成事件
 #define MAIN_EVENT_CLOCK_TICK (1 << 6) // 时钟节拍事件 (用于定时任务)
 
-// ======================= 待处理命令队列相关定义 =======================
-
-/**
- * @brief 待处理命令类型枚举
- *
- * 用于区分不同类型的命令，以便确定何时发送最终 ack：
- * - IMMEDIATE: 即时命令，收到 STM32 ACK 后即可发送 ack
- * - QUERY: 查询命令，需要等待 STM32 ACK + 数据帧后发送 ack
- * - LONG_FLOW: 长流程命令，需要等待 STM32 ACK + 最终结果后发送 ack
- */
-enum class PendingCommandType {
-  IMMEDIATE, ///< 即时命令：等待 STM32 ACK
-  QUERY,     ///< 查询命令：等待 STM32 ACK + 数据帧
-  LONG_FLOW, ///< 长流程命令：等待 STM32 ACK + 最终结果
-};
-
-/**
- * @brief 待处理命令信息结构体
- *
- * 用于保存服务器下发命令的上下文信息，以便在收到 STM32 响应时
- * 能够关联原始 seq_id 并发送正确的 ack 响应。
- */
-struct PendingCommand {
-  std::string seq_id;      ///< 原始消息 ID（来自服务器）
-  PendingCommandType type; ///< 命令类型
-  std::string category;    ///< 类别：finger/nfc/password/lock/dev/query
-  std::string command;     ///< 命令：add/del/clear/query/unlock/lock/beep/...
-  uint8_t uart_type;       ///< UART 命令 TYPE
-  uint8_t uart_subtype;    ///< UART 子命令（用于指纹/NFC）
-  int64_t timestamp_ms;    ///< 发送时间戳（毫秒）
-  bool esp32_ack_sent;     ///< 是否已发送 esp32_ack
-  bool stm32_ack_received; ///< 是否已收到 STM32 ACK
-  int stm32_error_code;    ///< STM32 ACK 错误码（0 表示成功）
-};
 
 /**
  * @brief 声学回声消除 (AEC) 模式枚举。
@@ -185,21 +150,9 @@ private:
   std::unique_ptr<MonitorService> monitor_service_;       // 监控服务对象
   xiaozhi::LockControlService *lock_control_;             // 锁控服务对象指针
 
-  // =========================================================================
-  // 待处理命令队列（两级确认机制）
-  // =========================================================================
-
-  /** 待处理命令映射表，key 为 UART TYPE */
-  std::map<uint8_t, PendingCommand> pending_commands_;
-
-  /** 即时命令超时时间（毫秒） */
-  static constexpr int64_t IMMEDIATE_TIMEOUT_MS = 3000;
-
-  /** 查询命令超时时间（毫秒） */
-  static constexpr int64_t QUERY_TIMEOUT_MS = 5000;
-
-  /** 长流程命令超时时间（毫秒） */
-  static constexpr int64_t LONG_FLOW_TIMEOUT_MS = 60000;
+  // 并发控制
+  bool busy_ = false;                      // 忙标志（正在等待 STM32 响应）
+  int pending_rpt_unlock_count_ = 0;       // face_result 场景下等待中的 RPT_UNLOCK 数量
 
   bool has_server_time_ = false;              // 是否已从服务器获取时间
   bool aborted_ = false;                      // 是否已中止 TTS 播放
@@ -238,8 +191,6 @@ private:
   /** 处理上报消息 (CAT = 0x01) */
   void HandleLockReportMessage(const xiaozhi::LockMessage &msg);
 
-  /** 处理系统消息 (CAT = 0x00) */
-  void HandleLockSystemMessage(const xiaozhi::LockMessage &msg);
 
   /** 处理用户管理反馈消息 (CAT = 0x03) */
   void HandleLockUserMessage(const xiaozhi::LockMessage &msg);
@@ -285,48 +236,6 @@ private:
    */
   bool HandleSmartLockJsonMessage(const cJSON *root, const char *type);
 
-  // =========================================================================
-  // 待处理命令队列相关方法（两级确认机制）
-  // =========================================================================
-
-  /**
-   * @brief 确定命令类型
-   * @param category 命令类别（finger/nfc/password/lock/dev/query）
-   * @param command 命令名称（add/del/clear/query/unlock/lock/beep/...）
-   * @return 命令类型枚举
-   */
-  PendingCommandType DetermineCommandType(const std::string &category,
-                                          const std::string &command);
-
-  /**
-   * @brief 获取 UART TYPE
-   * @param category 命令类别
-   * @param command 命令名称
-   * @return UART 命令 TYPE 值
-   */
-  uint8_t GetUartType(const std::string &category, const std::string &command);
-
-  /**
-   * @brief 映射 STM32 错误码到统一错误码
-   * @param stm32_err STM32 返回的错误码
-   * @return 统一错误码
-   */
-  int MapStm32ErrorCode(uint8_t stm32_err);
-
-  /**
-   * @brief 清理超时的待处理命令
-   *
-   * 遍历 pending_commands_，检查是否有超时的命令，
-   * 如果有则发送 ack(code=5) 并移除。
-   */
-  void CleanupPendingCommands();
-
-  /**
-   * @brief 获取命令类型对应的超时时间
-   * @param type 命令类型
-   * @return 超时时间（毫秒）
-   */
-  int64_t GetTimeoutForType(PendingCommandType type);
 
   // =========================================================================
   // 本地预览相关方法

@@ -314,19 +314,6 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (strcmp(type->valuestring, "hello") == 0) {
           ParseServerHello(root);
         } else {
-          // v5.0 协议：msg_id 防重放检查
-          auto msg_id = cJSON_GetObjectItem(root, "msg_id");
-          if (cJSON_IsString(msg_id)) {
-            std::string msg_id_str = msg_id->valuestring;
-            if (IsDuplicateMsgId(msg_id_str)) {
-              ESP_LOGW(TAG, "重复的 msg_id，忽略消息: %s", msg_id_str.c_str());
-              cJSON_Delete(root);
-              return;
-            }
-            // 添加到缓存
-            AddMsgIdToCache(msg_id_str);
-          }
-
           if (on_incoming_json_ != nullptr) {
             on_incoming_json_(root);
           }
@@ -459,36 +446,10 @@ void WebsocketProtocol::ParseServerHello(const cJSON *root) {
                      WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 }
 
-// ============================================================================
-// msg_id 防重放
-// ============================================================================
 
-bool WebsocketProtocol::IsDuplicateMsgId(const std::string &msg_id) {
-  return msg_id_set_.find(msg_id) != msg_id_set_.end();
-}
-
-void WebsocketProtocol::AddMsgIdToCache(const std::string &msg_id) {
-  // 缓存已满时，移除最旧的 msg_id
-  if (msg_id_queue_.size() >= MSG_ID_CACHE_SIZE) {
-    const std::string &oldest = msg_id_queue_.front();
-    msg_id_set_.erase(oldest);
-    msg_id_queue_.pop_front();
-  }
-
-  // 添加新的 msg_id
-  msg_id_queue_.push_back(msg_id);
-  msg_id_set_.insert(msg_id);
-}
-
-// ============================================================================
-// v5.0 协议扩展方法
-// ============================================================================
-
-void WebsocketProtocol::SendAck(const std::string &msg_id, int code,
-                                const std::string &msg) {
+void WebsocketProtocol::SendAck(int code, const std::string &msg) {
   cJSON *root = cJSON_CreateObject();
   cJSON_AddStringToObject(root, "type", "ack");
-  cJSON_AddStringToObject(root, "seq_id", msg_id.c_str());
   cJSON_AddNumberToObject(root, "code", code);
   cJSON_AddStringToObject(root, "msg", msg.c_str());
 
@@ -497,26 +458,10 @@ void WebsocketProtocol::SendAck(const std::string &msg_id, int code,
   cJSON_free(json_str);
   cJSON_Delete(root);
 
-  ESP_LOGI(TAG, "发送 ACK: seq_id=%s, code=%d", msg_id.c_str(), code);
+  ESP_LOGI(TAG, "发送 ACK: code=%d, msg=%s", code, msg.c_str());
   SendText(message);
 }
 
-void WebsocketProtocol::SendEsp32Ack(const std::string &seq_id, int code,
-                                     const std::string &msg) {
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddStringToObject(root, "type", "esp32_ack");
-  cJSON_AddStringToObject(root, "seq_id", seq_id.c_str());
-  cJSON_AddNumberToObject(root, "code", code);
-  cJSON_AddStringToObject(root, "msg", msg.c_str());
-
-  auto json_str = cJSON_PrintUnformatted(root);
-  std::string message(json_str);
-  cJSON_free(json_str);
-  cJSON_Delete(root);
-
-  ESP_LOGI(TAG, "发送 esp32_ack: seq_id=%s, code=%d", seq_id.c_str(), code);
-  SendText(message);
-}
 
 void WebsocketProtocol::SendStatusReport(int battery, int lux, int lock_state,
                                          int light_state) {
@@ -605,22 +550,6 @@ void WebsocketProtocol::SendDoorOpenedReport(const std::string &method,
   SendText(message);
 }
 
-void WebsocketProtocol::SendHeartbeat() {
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddStringToObject(root, "type", "heartbeat");
-  cJSON_AddNumberToObject(root, "ts", (double)(esp_timer_get_time() / 1000));
-  // uptime: 系统运行时间（秒）
-  cJSON_AddNumberToObject(root, "uptime",
-                          (double)(esp_timer_get_time() / 1000000));
-
-  auto json_str = cJSON_PrintUnformatted(root);
-  std::string message(json_str);
-  cJSON_free(json_str);
-  cJSON_Delete(root);
-
-  ESP_LOGD(TAG, "发送心跳");
-  SendText(message);
-}
 
 void WebsocketProtocol::SendUserMgmtResult(const std::string &category,
                                            const std::string &command,
@@ -644,24 +573,3 @@ void WebsocketProtocol::SendUserMgmtResult(const std::string &category,
   SendText(message);
 }
 
-void WebsocketProtocol::SendPasswordReport(uint32_t password) {
-  cJSON *root = cJSON_CreateObject();
-  cJSON_AddStringToObject(root, "type", "password_report");
-  cJSON_AddNumberToObject(root, "ts", (double)(esp_timer_get_time() / 1000));
-
-  cJSON *data = cJSON_CreateObject();
-  // 密码格式化为 6 位零填充字符串
-  char password_str[7];
-  snprintf(password_str, sizeof(password_str), "%06lu",
-           (unsigned long)(password % 1000000));
-  cJSON_AddStringToObject(data, "password", password_str);
-  cJSON_AddItemToObject(root, "data", data);
-
-  auto json_str = cJSON_PrintUnformatted(root);
-  std::string message(json_str);
-  cJSON_free(json_str);
-  cJSON_Delete(root);
-
-  ESP_LOGI(TAG, "发送密码上报: password=%s", password_str);
-  SendText(message);
-}

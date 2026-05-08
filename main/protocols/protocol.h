@@ -205,12 +205,10 @@ public:
 
   /**
    * @brief 发送 ACK 响应
-   * @param msg_id 消息 ID
-   * @param code   响应码（0=成功）
-   * @param msg    响应消息
+   * @param code 响应码（0=成功）
+   * @param msg  响应消息
    */
-  virtual void SendAck(const std::string &msg_id, int code = 0,
-                       const std::string &msg = "OK");
+  virtual void SendAck(int code, const std::string &msg);
 
   // =========================================================================
   // v5.0 协议扩展：状态与事件上报
@@ -253,8 +251,6 @@ public:
   virtual void SendDoorOpenedReport(const std::string &method,
                                     const std::string &source);
 
-  /** 发送心跳（预留功能） */
-  virtual void SendHeartbeat();
 
   /**
    * @brief 发送用户管理结果上报

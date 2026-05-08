@@ -29,7 +29,7 @@ static const char *const STATE_STRINGS[] = {
     "activating",        "audio_testing", "fatal_error", "monitor_connecting",
     "monitor_streaming", "invalid_state"};
 
-Application::Application() : lock_control_(nullptr) {
+Application::Application() : lock_control_(nullptr), busy_(false), pending_rpt_unlock_count_(0) {
   event_group_ = xEventGroupCreate();
 
 #if CONFIG_USE_DEVICE_AEC && CONFIG_USE_SERVER_AEC
@@ -752,9 +752,6 @@ void Application::MainEventLoop() {
       auto display = Board::GetInstance().GetDisplay();
       display->UpdateStatusBar();
 
-      // 每秒清理超时的待处理命令
-      CleanupPendingCommands();
-
       // 每10秒打印调试信息
 
       if (clock_ticks_ % 10 == 0) {
@@ -1168,8 +1165,6 @@ void Application::HandleLockEvent(const xiaozhi::LockMessage &msg) {
   // 根据消息类别分发处理
   if (msg.IsRpt()) {
     HandleLockReportMessage(msg);
-  } else if (msg.IsSys()) {
-    HandleLockSystemMessage(msg);
   } else if (msg.IsUser()) {
     HandleLockUserMessage(msg);
   }
@@ -1317,6 +1312,16 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
       protocol_->SendLogReport(method_str, status_str, uid, fail_count,
                                lock_time);
     }
+
+    // 并发控制：如果忙且是 App 命令触发的（非 face_result），清除忙标志并发送 ack
+    if (busy_) {
+      if (pending_rpt_unlock_count_ > 0) {
+        pending_rpt_unlock_count_--;
+      } else {
+        busy_ = false;
+        if (protocol_) protocol_->SendAck(0, "OK");
+      }
+    }
     break;
   }
 
@@ -1368,16 +1373,10 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
                                   last_light_state_);
     }
 
-    // 两级确认机制：查询命令收到数据帧后发送 ack
-    uint8_t query_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_SENSORS);
-    auto it = pending_commands_.find(query_type);
-    if (it != pending_commands_.end()) {
-      const PendingCommand &cmd = it->second;
-      if (cmd.type == PendingCommandType::QUERY && !cmd.seq_id.empty()) {
-        ESP_LOGI(TAG, "查询命令完成，发送 ack: seq_id=%s", cmd.seq_id.c_str());
-        protocol_->SendAck(cmd.seq_id, 0, "OK");
-      }
-      pending_commands_.erase(it);
+    // 查询命令完成，发送 ack
+    if (busy_) {
+      busy_ = false;
+      if (protocol_) protocol_->SendAck(0, "OK");
     }
     break;
   }
@@ -1399,16 +1398,10 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
                                   last_light_state_);
     }
 
-    // 两级确认机制：查询命令收到数据帧后发送 ack
-    uint8_t query_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_STATUS);
-    auto it = pending_commands_.find(query_type);
-    if (it != pending_commands_.end()) {
-      const PendingCommand &cmd = it->second;
-      if (cmd.type == PendingCommandType::QUERY && !cmd.seq_id.empty()) {
-        ESP_LOGI(TAG, "查询命令完成，发送 ack: seq_id=%s", cmd.seq_id.c_str());
-        protocol_->SendAck(cmd.seq_id, 0, "OK");
-      }
-      pending_commands_.erase(it);
+    // 查询命令完成，发送 ack
+    if (busy_) {
+      busy_ = false;
+      if (protocol_) protocol_->SendAck(0, "OK");
     }
     break;
   }
@@ -1418,25 +1411,14 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
     uint32_t pwd = xiaozhi::LockProtocol::DecodePasswordHex(msg.data);
     ESP_LOGI(TAG, "当前密码: %06lu", (unsigned long)pwd);
 
-    // v2.7 协议升级：上报密码到服务器
-    if (protocol_ && protocol_->IsAudioChannelOpened()) {
-      // 需要将 Protocol 转换为 WebsocketProtocol 才能调用 SendPasswordReport
-      auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
-      if (ws_protocol) {
-        ws_protocol->SendPasswordReport(pwd);
+    // 查询命令完成，在 ack 中返回密码
+    if (busy_) {
+      busy_ = false;
+      if (protocol_) {
+        char pwd_msg[32];
+        snprintf(pwd_msg, sizeof(pwd_msg), "password: %06lu", (unsigned long)pwd);
+        protocol_->SendAck(0, pwd_msg);
       }
-    }
-
-    // 两级确认机制：查询命令收到数据帧后发送 ack
-    uint8_t query_type = static_cast<uint8_t>(xiaozhi::UserPwdCmd::PWD_QUERY);
-    auto it = pending_commands_.find(query_type);
-    if (it != pending_commands_.end()) {
-      const PendingCommand &cmd = it->second;
-      if (cmd.type == PendingCommandType::QUERY && !cmd.seq_id.empty()) {
-        ESP_LOGI(TAG, "密码查询完成，发送 ack: seq_id=%s", cmd.seq_id.c_str());
-        protocol_->SendAck(cmd.seq_id, 0, "OK");
-      }
-      pending_commands_.erase(it);
     }
     break;
   }
@@ -1444,74 +1426,6 @@ void Application::HandleLockReportMessage(const xiaozhi::LockMessage &msg) {
   default:
     ESP_LOGW(TAG, "未知上报类型: 0x%02X", msg.type);
     break;
-  }
-}
-
-/**
- * @brief 处理系统消息 (CAT = 0x00)
- *
- * 包括：ACK_OK、ACK_ERR、PONG
- *
- * 两级确认机制：
- * - 即时命令：收到 STM32 ACK 后立即发送 ack 到服务器
- * - 查询/长流程命令：收到 STM32 ACK 后更新状态，等待数据帧/最终结果
- */
-void Application::HandleLockSystemMessage(const xiaozhi::LockMessage &msg) {
-  if (msg.IsAckOk()) {
-    uint8_t orig_type = msg.data[0];
-    ESP_LOGD(TAG, "收到 ACK_OK，原指令 TYPE=0x%02X", orig_type);
-
-    // 查找待处理命令
-    auto it = pending_commands_.find(orig_type);
-    if (it != pending_commands_.end()) {
-      PendingCommand &cmd = it->second;
-      cmd.stm32_ack_received = true;
-      cmd.stm32_error_code = 0;
-
-      ESP_LOGI(TAG, "匹配待处理命令: seq_id=%s, type=%d", cmd.seq_id.c_str(),
-               static_cast<int>(cmd.type));
-
-      // 根据命令类型决定是否发送最终 ack
-      if (cmd.type == PendingCommandType::IMMEDIATE) {
-        // 即时命令：收到 STM32 ACK 后立即发送 ack 到服务器
-        if (protocol_ && !cmd.seq_id.empty()) {
-          ESP_LOGI(TAG, "即时命令完成，发送 ack: seq_id=%s, code=0",
-                   cmd.seq_id.c_str());
-          protocol_->SendAck(cmd.seq_id, 0, "OK");
-        }
-        // 清理待处理命令
-        pending_commands_.erase(it);
-      } else {
-        // 查询/长流程命令：更新状态，继续等待数据帧/最终结果
-        ESP_LOGI(TAG, "查询/长流程命令，等待数据帧: seq_id=%s",
-                 cmd.seq_id.c_str());
-      }
-    }
-  } else if (msg.IsAckErr()) {
-    uint8_t orig_type = msg.data[0];
-    uint8_t error_code = msg.data[1];
-    ESP_LOGW(TAG, "收到 ACK_ERR，原指令 TYPE=0x%02X，错误码=0x%02X", orig_type,
-             error_code);
-
-    // 查找待处理命令
-    auto it = pending_commands_.find(orig_type);
-    if (it != pending_commands_.end()) {
-      PendingCommand &cmd = it->second;
-      cmd.stm32_ack_received = true;
-      cmd.stm32_error_code = error_code;
-
-      // 映射错误码并发送 ack 到服务器
-      int unified_code = MapStm32ErrorCode(error_code);
-      if (protocol_ && !cmd.seq_id.empty()) {
-        ESP_LOGI(TAG, "命令执行失败，发送 ack: seq_id=%s, code=%d",
-                 cmd.seq_id.c_str(), unified_code);
-        protocol_->SendAck(cmd.seq_id, unified_code, "STM32 error");
-      }
-      // 清理待处理命令
-      pending_commands_.erase(it);
-    }
-  } else if (msg.type == static_cast<uint8_t>(xiaozhi::SysType::SYS_PONG)) {
-    ESP_LOGD(TAG, "收到心跳响应");
   }
 }
 
@@ -1682,20 +1596,11 @@ void Application::HandleLockUserMessage(const xiaozhi::LockMessage &msg) {
     protocol_->SendUserMgmtResult(category, command, result, val, result_msg);
   }
 
-  // 两级确认机制：收到最终结果后发送 ack
-  if (is_final_result && uart_type != 0) {
-    auto it = pending_commands_.find(uart_type);
-    if (it != pending_commands_.end()) {
-      const PendingCommand &cmd = it->second;
-      if (!cmd.seq_id.empty() && protocol_) {
-        // 根据结果确定 ack code
-        int ack_code = result ? 0 : 10; // 成功=0，失败=10（内部错误）
-        ESP_LOGI(TAG, "用户管理命令完成，发送 ack: seq_id=%s, code=%d",
-                 cmd.seq_id.c_str(), ack_code);
-        protocol_->SendAck(cmd.seq_id, ack_code, result_msg);
-      }
-      pending_commands_.erase(it);
-    }
+  // 最终结果：清除忙标志并发送 ack
+  if (is_final_result) {
+    int ack_code = result ? 0 : 1;
+    if (protocol_) protocol_->SendAck(ack_code, result_msg);
+    busy_ = false;
   }
 }
 
@@ -2080,16 +1985,19 @@ bool Application::HandleSmartLockJsonMessage(const cJSON *root,
                                              const char *type) {
 
   // -------------------------------------------------------------------------
-  // 人脸识别结果（兼容旧版 face_recognition 和新版 face_result）
-  // 说明：face_result 是服务器主动推送的识别结果，不是用户命令
-  //       不需要 seq_id 和两级确认机制，开锁结果通过 log_report 上报
+  // 人脸识别结果（face_result / face_recognition）
+  // Server 主动推送，不受 App 串行约束，可中断当前操作
   // -------------------------------------------------------------------------
   if (strcmp(type, "face_recognition") == 0 ||
       strcmp(type, "face_result") == 0) {
     ESP_LOGI(TAG, "收到人脸识别结果");
 
+    // 如果当前忙且在等待 RPT_UNLOCK，增加计数（face_result 可中断）
+    if (busy_) {
+      pending_rpt_unlock_count_++;
+    }
+
     Schedule([this, root_copy = cJSON_Duplicate(root, 1)]() {
-      // 处理人脸识别结果
       HandleFaceRecognitionResult(root_copy);
       cJSON_Delete(root_copy);
     });
@@ -2097,649 +2005,211 @@ bool Application::HandleSmartLockJsonMessage(const cJSON *root,
   }
 
   // -------------------------------------------------------------------------
-  // 锁控命令：unlock（开锁）、lock（关锁）、temp_code（临时密码）
+  // 锁控命令：unlock / lock / temp_code
   // -------------------------------------------------------------------------
   if (strcmp(type, "lock_control") == 0) {
-    auto seq_id = cJSON_GetObjectItem(root, "seq_id");
-    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
     auto command = cJSON_GetObjectItem(root, "command");
-    // 优先使用 seq_id，兼容旧版 msg_id
-    std::string seq_id_str = cJSON_IsString(seq_id)   ? seq_id->valuestring
-                             : cJSON_IsString(msg_id) ? msg_id->valuestring
-                                                      : "";
 
     if (cJSON_IsString(command)) {
       std::string cmd_str = command->valuestring;
-      ESP_LOGI(TAG, "锁控命令: %s (seq_id=%s)", cmd_str.c_str(),
-               seq_id_str.c_str());
+      ESP_LOGI(TAG, "锁控命令: %s", cmd_str.c_str());
 
-      // 两级确认机制：立即发送 esp32_ack（第一级确认）
-      if (!seq_id_str.empty()) {
-        auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
-        if (ws_protocol) {
-          ws_protocol->SendEsp32Ack(seq_id_str, 0, "received");
-        }
+      if (!lock_control_) {
+        protocol_->SendAck(1, "Lock control not available");
+        return true;
       }
 
-      Schedule([this, cmd = cmd_str, root_copy = cJSON_Duplicate(root, 1),
-                seq_id_str]() {
-        int ack_code = 0;
-        std::string ack_msg = "OK";
+      if (busy_) {
+        protocol_->SendAck(1, "设备忙，请稍后重试");
+        return true;
+      }
 
-        if (!lock_control_) {
-          ESP_LOGW(TAG, "锁控服务不可用");
-          ack_code = 6; // 硬件故障
-          ack_msg = "Lock control not available";
-          // 直接发送 ack（无需等待 STM32 响应）
-          if (!seq_id_str.empty()) {
-            protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-          }
+      if (cmd_str == "unlock") {
+        busy_ = true;
+        auto duration = cJSON_GetObjectItem(root, "duration");
+        uint8_t hold_seconds = cJSON_IsNumber(duration) ? duration->valueint : 0;
+        lock_control_->SendUnlock(hold_seconds);
+        // ack 在收到 RPT_UNLOCK 后由 HandleLockReportMessage 发送
+      } else if (cmd_str == "lock") {
+        busy_ = true;
+        lock_control_->SendLockDoor();
+        // ack 在收到 RPT_UNLOCK 后由 HandleLockReportMessage 发送
+      } else if (cmd_str == "temp_code") {
+        auto code = cJSON_GetObjectItem(root, "code");
+        auto expires = cJSON_GetObjectItem(root, "expires");
+        if (cJSON_IsString(code)) {
+          uint32_t pwd = atoi(code->valuestring);
+          uint32_t exp_seconds = cJSON_IsNumber(expires) ? expires->valueint : 3600;
+          lock_control_->SetTempPassword(pwd, exp_seconds);
+          protocol_->SendAck(0, "OK");
         } else {
-          // 保存待处理命令到 pending_commands_
-          uint8_t uart_type = static_cast<uint8_t>(xiaozhi::CmdType::CMD_LOCK);
-          PendingCommand pending_cmd;
-          pending_cmd.seq_id = seq_id_str;
-          pending_cmd.type = PendingCommandType::IMMEDIATE;
-          pending_cmd.category = "lock";
-          pending_cmd.command = cmd;
-          pending_cmd.uart_type = uart_type;
-          pending_cmd.uart_subtype = 0;
-          pending_cmd.timestamp_ms = esp_timer_get_time() / 1000;
-          pending_cmd.esp32_ack_sent = true;
-          pending_cmd.stm32_ack_received = false;
-          pending_cmd.stm32_error_code = 0;
-
-          if (!seq_id_str.empty()) {
-            pending_commands_[uart_type] = pending_cmd;
-          }
-
-          if (cmd == "unlock") {
-            // 开锁命令，可选 duration 参数
-            auto duration = cJSON_GetObjectItem(root_copy, "duration");
-            uint8_t hold_seconds =
-                cJSON_IsNumber(duration) ? duration->valueint : 0;
-            lock_control_->SendUnlock(hold_seconds);
-          } else if (cmd == "lock") {
-            // 关锁命令
-            lock_control_->SendLockDoor();
-          } else if (cmd == "temp_code") {
-            // 设置临时密码（分两包发送给 STM32）
-            auto code = cJSON_GetObjectItem(root_copy, "code");
-            auto expires = cJSON_GetObjectItem(root_copy, "expires");
-            if (cJSON_IsString(code)) {
-              uint32_t pwd = atoi(code->valuestring);
-              uint32_t exp_seconds =
-                  cJSON_IsNumber(expires) ? expires->valueint : 3600;
-              lock_control_->SetTempPassword(pwd, exp_seconds);
-            }
-          } else {
-            ack_code = 4; // 不支持
-            ack_msg = "Unknown command";
-            // 未知命令，直接发送 ack
-            if (!seq_id_str.empty()) {
-              protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-              pending_commands_.erase(uart_type);
-            }
-          }
+          protocol_->SendAck(1, "Missing code");
         }
-
-        cJSON_Delete(root_copy);
-      });
+      } else {
+        protocol_->SendAck(1, "Unknown command");
+      }
     }
     return true;
   }
 
   // -------------------------------------------------------------------------
-  // 硬件外设控制：beep（蜂鸣器）、oled（显示）、light（补光灯）
+  // 硬件外设控制：beep / oled / light（发完即回 ack，不设 busy_）
   // -------------------------------------------------------------------------
   if (strcmp(type, "dev_control") == 0) {
-    auto seq_id = cJSON_GetObjectItem(root, "seq_id");
-    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
     auto target = cJSON_GetObjectItem(root, "target");
-    // 优先使用 seq_id，兼容旧版 msg_id
-    std::string seq_id_str = cJSON_IsString(seq_id)   ? seq_id->valuestring
-                             : cJSON_IsString(msg_id) ? msg_id->valuestring
-                                                      : "";
 
     if (cJSON_IsString(target)) {
       std::string target_str = target->valuestring;
-      ESP_LOGI(TAG, "外设控制: target=%s (seq_id=%s)", target_str.c_str(),
-               seq_id_str.c_str());
+      ESP_LOGI(TAG, "外设控制: target=%s", target_str.c_str());
 
-      // 两级确认机制：立即发送 esp32_ack（第一级确认）
-      if (!seq_id_str.empty()) {
-        auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
-        if (ws_protocol) {
-          ws_protocol->SendEsp32Ack(seq_id_str, 0, "received");
-        }
+      if (!lock_control_) {
+        protocol_->SendAck(1, "Lock control not available");
+        return true;
       }
 
-      Schedule([this, target_str, root_copy = cJSON_Duplicate(root, 1),
-                seq_id_str]() {
-        int ack_code = 0;
-        std::string ack_msg = "OK";
-        uint8_t uart_type = 0;
-
-        if (!lock_control_) {
-          ack_code = 6; // 硬件故障
-          ack_msg = "Lock control not available";
-          // 直接发送 ack
-          if (!seq_id_str.empty()) {
-            protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-          }
-        } else {
-          // 确定 UART TYPE
-          if (target_str == "beep") {
-            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::CMD_BEEP);
-          } else if (target_str == "oled") {
-            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::CMD_OLED);
-          } else if (target_str == "light") {
-            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::CMD_LIGHT);
-          }
-
-          // 保存待处理命令
-          if (uart_type != 0 && !seq_id_str.empty()) {
-            PendingCommand pending_cmd;
-            pending_cmd.seq_id = seq_id_str;
-            pending_cmd.type = PendingCommandType::IMMEDIATE;
-            pending_cmd.category = "dev";
-            pending_cmd.command = target_str;
-            pending_cmd.uart_type = uart_type;
-            pending_cmd.uart_subtype = 0;
-            pending_cmd.timestamp_ms = esp_timer_get_time() / 1000;
-            pending_cmd.esp32_ack_sent = true;
-            pending_cmd.stm32_ack_received = false;
-            pending_cmd.stm32_error_code = 0;
-            pending_commands_[uart_type] = pending_cmd;
-          }
-
-          if (target_str == "beep") {
-            // 蜂鸣器控制：count（次数）、mode（short/long/alarm）
-            auto count = cJSON_GetObjectItem(root_copy, "count");
-            auto mode = cJSON_GetObjectItem(root_copy, "mode");
-            uint8_t beep_count = cJSON_IsNumber(count) ? count->valueint : 1;
-            xiaozhi::BeepFreq freq = xiaozhi::BeepFreq::BEEP_SHORT;
-
-            if (cJSON_IsString(mode)) {
-              if (strcmp(mode->valuestring, "long") == 0) {
-                freq = xiaozhi::BeepFreq::BEEP_LONG;
-              } else if (strcmp(mode->valuestring, "alarm") == 0) {
-                freq = xiaozhi::BeepFreq::BEEP_ALARM;
-              }
-            }
-            lock_control_->SendBeep(beep_count, freq);
-          } else if (target_str == "oled") {
-            // OLED 图标显示：icon（图标编号）
-            auto icon = cJSON_GetObjectItem(root_copy, "icon");
-            if (cJSON_IsNumber(icon)) {
-              lock_control_->SendOledIcon(
-                  static_cast<xiaozhi::OledIcon>(icon->valueint));
-            }
-          } else if (target_str == "light") {
-            // 补光灯控制：action（on/off/auto）
-            auto action = cJSON_GetObjectItem(root_copy, "action");
-            if (cJSON_IsString(action)) {
-              if (strcmp(action->valuestring, "on") == 0) {
-                lock_control_->SendLightOn();
-              } else if (strcmp(action->valuestring, "off") == 0) {
-                lock_control_->SendLightOff();
-              } else if (strcmp(action->valuestring, "auto") == 0) {
-                lock_control_->SendLightAuto();
-              }
-            }
-          } else {
-            ack_code = 4; // 不支持
-            ack_msg = "Unknown target";
-            // 未知目标，直接发送 ack
-            if (!seq_id_str.empty()) {
-              protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-            }
-          }
+      if (target_str == "beep") {
+        auto count = cJSON_GetObjectItem(root, "count");
+        auto mode = cJSON_GetObjectItem(root, "mode");
+        uint8_t beep_count = cJSON_IsNumber(count) ? count->valueint : 1;
+        xiaozhi::BeepFreq freq = xiaozhi::BeepFreq::BEEP_SHORT;
+        if (cJSON_IsString(mode)) {
+          if (strcmp(mode->valuestring, "long") == 0)
+            freq = xiaozhi::BeepFreq::BEEP_LONG;
+          else if (strcmp(mode->valuestring, "alarm") == 0)
+            freq = xiaozhi::BeepFreq::BEEP_ALARM;
         }
+        lock_control_->SendBeep(beep_count, freq);
+      } else if (target_str == "oled") {
+        auto icon = cJSON_GetObjectItem(root, "icon");
+        if (cJSON_IsNumber(icon)) {
+          lock_control_->SendOledIcon(
+              static_cast<xiaozhi::OledIcon>(icon->valueint));
+        }
+      } else if (target_str == "light") {
+        auto action = cJSON_GetObjectItem(root, "action");
+        if (cJSON_IsString(action)) {
+          if (strcmp(action->valuestring, "on") == 0)
+            lock_control_->SendLightOn();
+          else if (strcmp(action->valuestring, "off") == 0)
+            lock_control_->SendLightOff();
+          else if (strcmp(action->valuestring, "auto") == 0)
+            lock_control_->SendLightAuto();
+        }
+      } else {
+        protocol_->SendAck(1, "Unknown target");
+        return true;
+      }
 
-        cJSON_Delete(root_copy);
-      });
+      protocol_->SendAck(0, "OK");  // 立即回复，不设 busy_
     }
     return true;
   }
 
   // -------------------------------------------------------------------------
-  // 用户管理：finger（指纹）、nfc、password（密码）
+  // 用户管理：finger / nfc / password
   // -------------------------------------------------------------------------
   if (strcmp(type, "user_mgmt") == 0) {
-    auto seq_id = cJSON_GetObjectItem(root, "seq_id");
-    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
     auto category = cJSON_GetObjectItem(root, "category");
     auto command = cJSON_GetObjectItem(root, "command");
-    // 优先使用 seq_id，兼容旧版 msg_id
-    std::string seq_id_str = cJSON_IsString(seq_id)   ? seq_id->valuestring
-                             : cJSON_IsString(msg_id) ? msg_id->valuestring
-                                                      : "";
 
     if (cJSON_IsString(category) && cJSON_IsString(command)) {
       std::string cat_str = category->valuestring;
       std::string cmd_str = command->valuestring;
-      ESP_LOGI(TAG, "用户管理: category=%s, command=%s (seq_id=%s)",
-               cat_str.c_str(), cmd_str.c_str(), seq_id_str.c_str());
+      ESP_LOGI(TAG, "用户管理: category=%s, command=%s", cat_str.c_str(),
+               cmd_str.c_str());
 
-      // 两级确认机制：立即发送 esp32_ack（第一级确认）
-      if (!seq_id_str.empty()) {
-        auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
-        if (ws_protocol) {
-          ws_protocol->SendEsp32Ack(seq_id_str, 0, "received");
+      if (!lock_control_) {
+        protocol_->SendAck(1, "Lock control not available");
+        return true;
+      }
+
+      // 录入和查询命令需要排他性（设 busy_）
+      if (cmd_str == "add" || cmd_str == "query") {
+        if (busy_) {
+          protocol_->SendAck(1, "设备忙，请稍后重试");
+          return true;
+        }
+        busy_ = true;
+      }
+
+      auto user_id = cJSON_GetObjectItem(root, "user_id");
+      uint8_t uid = cJSON_IsNumber(user_id) ? user_id->valueint : 0;
+
+      if (cat_str == "finger") {
+        if (cmd_str == "add")
+          lock_control_->FingerprintEnroll(uid);
+        else if (cmd_str == "del")
+          lock_control_->FingerprintDelete(uid);
+        else if (cmd_str == "clear")
+          lock_control_->FingerprintClear();
+        else if (cmd_str == "query")
+          lock_control_->FingerprintQueryCount();
+      } else if (cat_str == "nfc") {
+        if (cmd_str == "add")
+          lock_control_->NfcEnroll();
+        else if (cmd_str == "del")
+          lock_control_->NfcDelete(uid);
+        else if (cmd_str == "clear")
+          lock_control_->NfcClear();
+        else if (cmd_str == "query")
+          lock_control_->NfcQueryCount();
+      } else if (cat_str == "password") {
+        if (cmd_str == "set") {
+          auto payload = cJSON_GetObjectItem(root, "payload");
+          if (cJSON_IsString(payload)) {
+            uint32_t pwd = atoi(payload->valuestring);
+            lock_control_->SetPassword(pwd);
+          }
+        } else if (cmd_str == "query") {
+          lock_control_->QueryPassword();
         }
       }
 
-      Schedule([this, cat = cat_str, cmd = cmd_str,
-                root_copy = cJSON_Duplicate(root, 1), seq_id_str]() {
-        int ack_code = 0;
-        std::string ack_msg = "OK";
-
-        if (!lock_control_) {
-          ack_code = 6; // 硬件故障
-          ack_msg = "Lock control not available";
-          // 直接发送 ack
-          if (!seq_id_str.empty()) {
-            protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-          }
-        } else {
-          auto user_id = cJSON_GetObjectItem(root_copy, "user_id");
-          uint8_t uid = cJSON_IsNumber(user_id) ? user_id->valueint : 0;
-
-          // 确定命令类型和 UART TYPE
-          PendingCommandType cmd_type = DetermineCommandType(cat, cmd);
-          uint8_t uart_type = GetUartType(cat, cmd);
-          uint8_t uart_subtype = 0;
-
-          // 确定子命令
-          if (cmd == "add") {
-            uart_subtype = static_cast<uint8_t>(xiaozhi::FpSubCmd::FP_ENROLL);
-          } else if (cmd == "del") {
-            uart_subtype = static_cast<uint8_t>(xiaozhi::FpSubCmd::FP_DELETE);
-          } else if (cmd == "clear") {
-            uart_subtype = static_cast<uint8_t>(xiaozhi::FpSubCmd::FP_CLEAR);
-          } else if (cmd == "query") {
-            uart_subtype = static_cast<uint8_t>(xiaozhi::FpSubCmd::FP_COUNT);
-          }
-
-          // 保存待处理命令
-          if (uart_type != 0 && !seq_id_str.empty()) {
-            PendingCommand pending_cmd;
-            pending_cmd.seq_id = seq_id_str;
-            pending_cmd.type = cmd_type;
-            pending_cmd.category = cat;
-            pending_cmd.command = cmd;
-            pending_cmd.uart_type = uart_type;
-            pending_cmd.uart_subtype = uart_subtype;
-            pending_cmd.timestamp_ms = esp_timer_get_time() / 1000;
-            pending_cmd.esp32_ack_sent = true;
-            pending_cmd.stm32_ack_received = false;
-            pending_cmd.stm32_error_code = 0;
-            pending_commands_[uart_type] = pending_cmd;
-          }
-
-          if (cat == "finger") {
-            // 指纹管理：add/del/clear/query
-            if (cmd == "add") {
-              lock_control_->FingerprintEnroll(uid);
-            } else if (cmd == "del") {
-              lock_control_->FingerprintDelete(uid);
-            } else if (cmd == "clear") {
-              lock_control_->FingerprintClear();
-            } else if (cmd == "query") {
-              lock_control_->FingerprintQueryCount();
-            }
-          } else if (cat == "nfc") {
-            // NFC 管理：add/del/clear/query
-            if (cmd == "add") {
-              lock_control_->NfcEnroll();
-            } else if (cmd == "del") {
-              lock_control_->NfcDelete(uid);
-            } else if (cmd == "clear") {
-              lock_control_->NfcClear();
-            } else if (cmd == "query") {
-              lock_control_->NfcQueryCount();
-            }
-          } else if (cat == "password") {
-            // 密码管理：set/query
-            if (cmd == "set") {
-              auto payload = cJSON_GetObjectItem(root_copy, "payload");
-              if (cJSON_IsString(payload)) {
-                uint32_t pwd = atoi(payload->valuestring);
-                lock_control_->SetPassword(pwd);
-              }
-            } else if (cmd == "query") {
-              lock_control_->QueryPassword();
-            }
-          }
-        }
-
-        cJSON_Delete(root_copy);
-      });
+      // del/clear/set 立即回复 ack，add/query 由 HandleLockUserMessage 回复
+      if (cmd_str != "add" && cmd_str != "query") {
+        protocol_->SendAck(0, "OK");
+      }
     }
     return true;
   }
 
   // -------------------------------------------------------------------------
-  // 查询命令：sensors（传感器数据）、status（设备状态）
-  // v5.2 新增：支持服务器远程查询
+  // 查询命令：sensors / status
   // -------------------------------------------------------------------------
   if (strcmp(type, "query") == 0) {
-    auto seq_id = cJSON_GetObjectItem(root, "seq_id");
-    auto msg_id = cJSON_GetObjectItem(root, "msg_id");
     auto command = cJSON_GetObjectItem(root, "command");
-    // 优先使用 seq_id，兼容旧版 msg_id
-    std::string seq_id_str = cJSON_IsString(seq_id)   ? seq_id->valuestring
-                             : cJSON_IsString(msg_id) ? msg_id->valuestring
-                                                      : "";
 
     if (cJSON_IsString(command)) {
       std::string cmd_str = command->valuestring;
-      ESP_LOGI(TAG, "查询命令: %s (seq_id=%s)", cmd_str.c_str(),
-               seq_id_str.c_str());
+      ESP_LOGI(TAG, "查询命令: %s", cmd_str.c_str());
 
-      // 两级确认机制：立即发送 esp32_ack（第一级确认）
-      if (!seq_id_str.empty()) {
-        auto ws_protocol = dynamic_cast<WebsocketProtocol *>(protocol_.get());
-        if (ws_protocol) {
-          ws_protocol->SendEsp32Ack(seq_id_str, 0, "received");
-        }
+      if (!lock_control_) {
+        protocol_->SendAck(1, "Lock control not available");
+        return true;
       }
 
-      Schedule([this, cmd = cmd_str, seq_id_str]() {
-        int ack_code = 0;
-        std::string ack_msg = "OK";
+      if (busy_) {
+        protocol_->SendAck(1, "设备忙，请稍后重试");
+        return true;
+      }
+      busy_ = true;
 
-        if (!lock_control_) {
-          ack_code = 6; // 硬件故障
-          ack_msg = "Lock control not available";
-          // 直接发送 ack
-          if (!seq_id_str.empty()) {
-            protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-          }
-        } else {
-          // 确定 UART TYPE
-          uint8_t uart_type = 0;
-          if (cmd == "sensors") {
-            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_SENSORS);
-          } else if (cmd == "status") {
-            uart_type = static_cast<uint8_t>(xiaozhi::CmdType::Q_STATUS);
-          }
-
-          if (uart_type != 0) {
-            // 保存待处理命令（type = QUERY）
-            if (!seq_id_str.empty()) {
-              PendingCommand pending_cmd;
-              pending_cmd.seq_id = seq_id_str;
-              pending_cmd.type = PendingCommandType::QUERY;
-              pending_cmd.category = "query";
-              pending_cmd.command = cmd;
-              pending_cmd.uart_type = uart_type;
-              pending_cmd.uart_subtype = 0;
-              pending_cmd.timestamp_ms = esp_timer_get_time() / 1000;
-              pending_cmd.esp32_ack_sent = true;
-              pending_cmd.stm32_ack_received = false;
-              pending_cmd.stm32_error_code = 0;
-              pending_commands_[uart_type] = pending_cmd;
-            }
-
-            // 发送查询命令到 STM32
-            if (cmd == "sensors") {
-              lock_control_->QuerySensors();
-            } else if (cmd == "status") {
-              lock_control_->QueryStatus();
-            }
-            // ack 将在收到 STM32 数据帧（RPT_ENV/RPT_STATE）后发送
-          } else {
-            ack_code = 4; // 不支持
-            ack_msg = "Unknown query command";
-            // 未知命令，直接发送 ack
-            if (!seq_id_str.empty()) {
-              protocol_->SendAck(seq_id_str, ack_code, ack_msg);
-            }
-          }
-        }
-      });
+      if (cmd_str == "sensors") {
+        lock_control_->QuerySensors();
+      } else if (cmd_str == "status") {
+        lock_control_->QueryStatus();
+      } else {
+        busy_ = false;
+        protocol_->SendAck(1, "Unknown query command");
+      }
+      // ack 在收到数据帧后由 HandleLockReportMessage 发送
     }
-    return true;
-  }
-
-  // -------------------------------------------------------------------------
-  // 心跳响应
-  // -------------------------------------------------------------------------
-  if (strcmp(type, "heartbeat_ack") == 0) {
-    ESP_LOGD(TAG, "收到心跳响应");
     return true;
   }
 
   // 未识别的消息类型
   return false;
 }
-
-// ============================================================================
-// 待处理命令队列相关方法（两级确认机制）
-// ============================================================================
-
-/**
- * @brief 确定命令类型
- *
- * 根据命令类别和命令名称确定命令类型：
- * - IMMEDIATE:
- * 即时命令（开锁、关锁、蜂鸣器、OLED、补光灯、删除、清空、设置密码）
- * - QUERY: 查询命令（查询传感器、状态、指纹数量、NFC数量、密码）
- * - LONG_FLOW: 长流程命令（指纹录入、NFC录入）
- *
- * @param category 命令类别
- * @param command 命令名称
- * @return 命令类型枚举
- */
-PendingCommandType
-Application::DetermineCommandType(const std::string &category,
-                                  const std::string &command) {
-  // 长流程命令：指纹/NFC 录入
-  if ((category == "finger" || category == "nfc") && command == "add") {
-    return PendingCommandType::LONG_FLOW;
-  }
-
-  // 查询命令
-  if (category == "query") {
-    return PendingCommandType::QUERY;
-  }
-  if ((category == "finger" || category == "nfc" || category == "password") &&
-      command == "query") {
-    return PendingCommandType::QUERY;
-  }
-
-  // 其他都是即时命令
-  return PendingCommandType::IMMEDIATE;
-}
-
-/**
- * @brief 获取 UART TYPE
- *
- * 根据命令类别和命令名称返回对应的 UART TYPE 值。
- *
- * @param category 命令类别
- * @param command 命令名称
- * @return UART 命令 TYPE 值，如果无法确定则返回 0
- */
-uint8_t Application::GetUartType(const std::string &category,
-                                 const std::string &command) {
-  // 锁控命令
-  if (category == "lock") {
-    return static_cast<uint8_t>(xiaozhi::CmdType::CMD_LOCK);
-  }
-
-  // 设备控制命令
-  if (category == "dev") {
-    if (command == "beep") {
-      return static_cast<uint8_t>(xiaozhi::CmdType::CMD_BEEP);
-    } else if (command == "oled") {
-      return static_cast<uint8_t>(xiaozhi::CmdType::CMD_OLED);
-    } else if (command == "light") {
-      return static_cast<uint8_t>(xiaozhi::CmdType::CMD_LIGHT);
-    }
-  }
-
-  // 查询命令
-  if (category == "query") {
-    if (command == "sensors") {
-      return static_cast<uint8_t>(xiaozhi::CmdType::Q_SENSORS);
-    } else if (command == "status") {
-      return static_cast<uint8_t>(xiaozhi::CmdType::Q_STATUS);
-    }
-  }
-
-  // 指纹管理命令
-  if (category == "finger") {
-    return static_cast<uint8_t>(xiaozhi::UserFpCmd::FP_CMD);
-  }
-
-  // NFC 管理命令
-  if (category == "nfc") {
-    return static_cast<uint8_t>(xiaozhi::UserNfcCmd::NFC_CMD);
-  }
-
-  // 密码管理命令
-  if (category == "password") {
-    if (command == "set") {
-      return static_cast<uint8_t>(xiaozhi::UserPwdCmd::PWD_SET);
-    } else if (command == "query") {
-      return static_cast<uint8_t>(xiaozhi::UserPwdCmd::PWD_QUERY);
-    }
-  }
-
-  // 未知命令
-  ESP_LOGW(TAG, "未知命令类型: category=%s, command=%s", category.c_str(),
-           command.c_str());
-  return 0;
-}
-
-/**
- * @brief 映射 STM32 错误码到统一错误码
- *
- * 统一错误码表：
- * - 0: 成功
- * - 2: 设备忙 (STM32: 0x01 ERR_BUSY)
- * - 3: 参数错误 (STM32: 0x03 ERR_PARAM)
- * - 4: 不支持 (STM32: 0x02 ERR_UNSUPPORT)
- * - 5: 超时 (STM32: 0xFF ERR_TIMEOUT)
- * - 6: 硬件故障 (STM32: 0x06 ERR_HARDWARE)
- * - 7: 资源已满 (STM32: 0x04 ERR_FP_FULL, 0x05 ERR_NFC_FULL)
- * - 10: 内部错误（未知错误）
- *
- * @param stm32_err STM32 返回的错误码
- * @return 统一错误码
- */
-int Application::MapStm32ErrorCode(uint8_t stm32_err) {
-  switch (stm32_err) {
-  case 0x00:
-    // 成功（ACK_OK 时 data[1] 为 0xFF，但这里处理的是 ACK_ERR 的错误码）
-    return 0;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_BUSY):
-    // 0x01: 设备忙
-    return 2;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_UNSUPPORT):
-    // 0x02: 不支持的命令
-    return 4;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_PARAM):
-    // 0x03: 参数错误
-    return 3;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_FP_FULL):
-    // 0x04: 指纹库已满
-    return 7;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_NFC_FULL):
-    // 0x05: NFC 库已满
-    return 7;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_HARDWARE):
-    // 0x06: 硬件错误
-    return 6;
-
-  case static_cast<uint8_t>(xiaozhi::AckError::ERR_TIMEOUT):
-    // 0xFF: 操作超时
-    return 5;
-
-  default:
-    // 未知错误
-    ESP_LOGW(TAG, "未知 STM32 错误码: 0x%02X，映射为内部错误", stm32_err);
-    return 10;
-  }
-}
-
-/**
- * @brief 获取命令类型对应的超时时间
- *
- * @param type 命令类型
- * @return 超时时间（毫秒）
- */
-int64_t Application::GetTimeoutForType(PendingCommandType type) {
-  switch (type) {
-  case PendingCommandType::IMMEDIATE:
-    return IMMEDIATE_TIMEOUT_MS;
-  case PendingCommandType::QUERY:
-    return QUERY_TIMEOUT_MS;
-  case PendingCommandType::LONG_FLOW:
-    return LONG_FLOW_TIMEOUT_MS;
-  default:
-    return IMMEDIATE_TIMEOUT_MS;
-  }
-}
-
-/**
- * @brief 清理超时的待处理命令
- *
- * 遍历 pending_commands_，检查是否有超时的命令，
- * 如果有则发送 ack(code=5) 并移除。
- *
- * 此方法应在时钟节拍中定期调用（每秒一次）。
- */
-void Application::CleanupPendingCommands() {
-  if (pending_commands_.empty()) {
-    return;
-  }
-
-  // 获取当前时间戳（毫秒）
-  int64_t now_ms = esp_timer_get_time() / 1000;
-
-  // 收集需要删除的命令（避免在遍历时修改容器）
-  std::vector<uint8_t> expired_keys;
-
-  for (const auto &pair : pending_commands_) {
-    const PendingCommand &cmd = pair.second;
-    int64_t timeout_ms = GetTimeoutForType(cmd.type);
-    int64_t elapsed_ms = now_ms - cmd.timestamp_ms;
-
-    if (elapsed_ms > timeout_ms) {
-      ESP_LOGW(TAG, "命令超时: seq_id=%s, uart_type=0x%02X, elapsed=%lld ms",
-               cmd.seq_id.c_str(), cmd.uart_type, elapsed_ms);
-      expired_keys.push_back(pair.first);
-    }
-  }
-
-  // 处理超时命令
-  for (uint8_t key : expired_keys) {
-    auto it = pending_commands_.find(key);
-    if (it != pending_commands_.end()) {
-      const PendingCommand &cmd = it->second;
-
-      // 发送超时 ack（code=5 表示超时）
-      if (protocol_ && !cmd.seq_id.empty()) {
-        ESP_LOGI(TAG, "发送超时 ack: seq_id=%s, code=5", cmd.seq_id.c_str());
-        protocol_->SendAck(cmd.seq_id, 5, "Timeout");
-      }
-
-      // 移除超时命令
-      pending_commands_.erase(it);
-    }
-  }
-}
-
 // ============================================================================
 // 本地预览功能
 // ============================================================================
