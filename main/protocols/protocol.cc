@@ -111,15 +111,19 @@ void Protocol::SendMcpMessage(const std::string &payload) {
 // ============================================================================
 
 bool Protocol::IsTimeout() const {
-  const int kTimeoutSeconds = 120;
-  auto now = std::chrono::steady_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-      now - last_incoming_time_);
-  bool timeout = duration.count() > kTimeoutSeconds;
-  if (timeout) {
-    ESP_LOGE(TAG, "Channel timeout %d seconds", (int)duration.count());
-  }
-  return timeout;
+  // 禁用超时断开功能，连接将保持直到主动关闭
+  return false;
+
+  // 原超时逻辑已禁用：
+  // const int kTimeoutSeconds = 120;
+  // auto now = std::chrono::steady_clock::now();
+  // auto duration = std::chrono::duration_cast<std::chrono::seconds>(
+  //     now - last_incoming_time_);
+  // bool timeout = duration.count() > kTimeoutSeconds;
+  // if (timeout) {
+  //   ESP_LOGE(TAG, "Channel timeout %d seconds", (int)duration.count());
+  // }
+  // return timeout;
 }
 
 // ============================================================================

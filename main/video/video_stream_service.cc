@@ -207,6 +207,9 @@ void VideoStreamService::CaptureLoop() {
             continue;
         }
 
+        // === 性能计时：捕获阶段 ===
+        TickType_t t_capture_start = xTaskGetTickCount();
+
         // 捕获原始图像
         // CaptureForStream() 专为视频流优化，不显示预览
         if (!esp32_camera->CaptureForStream()) {
@@ -215,6 +218,9 @@ void VideoStreamService::CaptureLoop() {
             continue;
         }
 
+        TickType_t t_capture_done = xTaskGetTickCount();
+
+        // === 性能计时：编码阶段 ===
         // 编码为 JPEG 格式
         uint8_t* jpeg_data = nullptr;
         size_t jpeg_size = 0;
@@ -224,6 +230,8 @@ void VideoStreamService::CaptureLoop() {
             vTaskDelay(frame_delay);
             continue;
         }
+
+        TickType_t t_encode_done = xTaskGetTickCount();
 
         // 创建帧对象并填充数据
         auto frame = std::make_unique<JpegFrame>();
@@ -235,6 +243,15 @@ void VideoStreamService::CaptureLoop() {
         // 释放临时分配的 JPEG 数据内存
         // CaptureJpeg() 使用 heap_caps_malloc 分配，需要用 heap_caps_free 释放
         heap_caps_free(jpeg_data);
+
+        TickType_t t_copy_done = xTaskGetTickCount();
+
+        // === 输出性能日志 ===
+        ESP_LOGI(TAG, "[性能] 捕获=%dms, 编码=%dms, 拷贝=%dms, 帧大小=%zu bytes, 分辨率=%dx%d",
+                 (int)((t_capture_done - t_capture_start) * portTICK_PERIOD_MS),
+                 (int)((t_encode_done - t_capture_done) * portTICK_PERIOD_MS),
+                 (int)((t_copy_done - t_encode_done) * portTICK_PERIOD_MS),
+                 jpeg_size, frame->width, frame->height);
 
         // 将帧添加到队列
         {
@@ -255,6 +272,10 @@ void VideoStreamService::CaptureLoop() {
         if (elapsed < frame_delay) {
             // 等待剩余时间以维持目标帧率
             vTaskDelay(frame_delay - elapsed);
+        } else {
+            // 处理时间超过帧间隔，输出警告
+            ESP_LOGW(TAG, "[性能] 帧处理超时: 实际耗时=%dms, 目标间隔=%dms",
+                     (int)(elapsed * portTICK_PERIOD_MS), 1000 / target_fps_);
         }
         // 如果处理时间超过帧间隔，不等待，立即处理下一帧
     }

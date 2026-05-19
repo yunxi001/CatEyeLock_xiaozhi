@@ -208,6 +208,19 @@ private:
   TaskHandle_t check_new_version_task_handle_ = nullptr; // 检查新版本任务的句柄
   TaskHandle_t main_event_loop_task_handle_ = nullptr;   // 主事件循环任务的句柄
 
+  // =========================================================================
+  // 自动连接相关成员变量
+  // =========================================================================
+  TaskHandle_t auto_connect_task_handle_ = nullptr; // 自动连接任务句柄
+  bool auto_connect_enabled_ = true;                // 是否启用自动连接
+  bool user_manually_disconnected_ = false;         // 用户是否主动断开连接
+  int connection_retry_count_ = 0;                  // 连接重试计数
+
+  // 指数退避参数
+  static constexpr int INITIAL_RETRY_DELAY_MS = 1000; // 初始重试延迟：1秒
+  static constexpr int MAX_RETRY_DELAY_MS = 60000;    // 最大重试延迟：60秒
+  static constexpr int MAX_RETRY_COUNT = -1; // 最大重试次数：-1表示无限重试
+
   // 本地预览相关成员变量
   bool local_preview_active_ = false;           // 预览活动标志
   TaskHandle_t preview_capture_task_ = nullptr; // 捕获任务句柄
@@ -227,6 +240,46 @@ private:
   void ShowActivationCode(const std::string &code,
                           const std::string &message); // 显示激活码
   void SetListeningMode(ListeningMode mode);           // 设置聆听模式
+
+  // =========================================================================
+  // 自动连接相关方法
+  // =========================================================================
+
+  /**
+   * @brief 自动连接任务循环
+   *
+   * 独立的 FreeRTOS 任务，负责：
+   * 1. 检查网络状态和连接条件
+   * 2. 尝试连接服务器
+   * 3. 连接失败后使用指数退避策略重试
+   * 4. 连接成功后监控连接状态
+   */
+  void AutoConnectLoop();
+
+  /**
+   * @brief 判断是否应该自动连接
+   * @return 如果满足自动连接条件返回 true
+   *
+   * 检查条件：
+   * - 自动连接功能已启用
+   * - Protocol 已初始化
+   * - 当前未连接服务器
+   * - 网络已连接
+   * - 设备处于合适的状态（Idle 或 Listening）
+   * - 用户未主动断开连接
+   */
+  bool ShouldAutoConnect();
+
+  /**
+   * @brief 计算指数退避延迟时间
+   * @param retry_count 当前重试次数
+   * @return 延迟时间（毫秒）
+   *
+   * 使用指数退避算法：delay = INITIAL_DELAY * 2^retry_count
+   * 最大延迟不超过 MAX_RETRY_DELAY_MS
+   * 添加 ±20% 随机抖动避免多设备同时重连
+   */
+  int CalculateRetryDelay(int retry_count);
 
   // =========================================================================
   // 锁控相关方法（智能门锁扩展功能）

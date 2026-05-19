@@ -71,6 +71,24 @@ void AudioService::Initialize(AudioCodec* codec) {
         .skip_unhandled_events = true,
     };
     esp_timer_create(&audio_power_timer_args, &audio_power_timer_);
+
+    // 预初始化音频输出通路：本地音效采样率为 16000Hz，
+    // 如果与 codec 输出采样率不同，提前配置好解码器和 resampler，
+    // 避免第一次 PlaySound 时重建解码器导致音频丢失
+    const int local_sound_sample_rate = 16000;
+    const int local_sound_frame_duration = OPUS_FRAME_DURATION_MS;
+    if (opus_decoder_->sample_rate() != local_sound_sample_rate ||
+        opus_decoder_->duration_ms() != local_sound_frame_duration) {
+        opus_decoder_.reset();
+        opus_decoder_ = std::make_unique<OpusDecoderWrapper>(local_sound_sample_rate, 1, local_sound_frame_duration);
+        ESP_LOGI(TAG, "预初始化解码器: sample_rate=%d, frame_duration=%d",
+                 local_sound_sample_rate, local_sound_frame_duration);
+    }
+    if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
+        output_resampler_.Configure(opus_decoder_->sample_rate(), codec->output_sample_rate());
+        ESP_LOGI(TAG, "预配置输出重采样: %d -> %d",
+                 opus_decoder_->sample_rate(), codec->output_sample_rate());
+    }
 }
 
 void AudioService::Start() {

@@ -298,6 +298,8 @@ void Application::ToggleChatState() {
   } else if (device_state_ == kDeviceStateSpeaking) {
     Schedule([this]() { AbortSpeaking(kAbortReasonNone); });
   } else if (device_state_ == kDeviceStateListening) {
+    // 用户主动断开连接
+    user_manually_disconnected_ = true;
     Schedule([this]() { protocol_->CloseAudioChannel(); });
   }
 }
@@ -354,6 +356,9 @@ void Application::StopListening() {
       valid_states.end()) {
     return;
   }
+
+  // 用户主动停止监听
+  user_manually_disconnected_ = true;
 
   Schedule([this]() {
     if (device_state_ == kDeviceStateListening) {
@@ -459,6 +464,14 @@ void Application::Start() {
                "%d, resampling may cause distortion",
                protocol_->server_sample_rate(), codec->output_sample_rate());
     }
+
+    // 连接服务器成功后隐藏 UI（门锁模式）
+    auto display = Board::GetInstance().GetDisplay();
+    auto lcd_display = dynamic_cast<LcdDisplay *>(display);
+    if (lcd_display) {
+      lcd_display->HideAllUI();
+      ESP_LOGI(TAG, "已切换到门锁模式（UI 隐藏）");
+    }
   });
   protocol_->OnAudioChannelClosed([this, &board]() {
     board.SetPowerSaveMode(true);
@@ -554,79 +567,6 @@ void Application::Start() {
           ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
         }
       }
-    } else if (strcmp(type->valuestring, "local_preview") == 0) {
-      // 本地预览命令处理
-      auto action = cJSON_GetObjectItem(root, "action");
-      if (cJSON_IsString(action)) {
-        ESP_LOGI(TAG, "本地预览命令: %s", action->valuestring);
-
-        if (strcmp(action->valuestring, "start") == 0) {
-          // 启动本地预览
-          Schedule([this]() {
-            bool success = StartLocalPreview();
-
-            // 构造响应 JSON
-            cJSON *response = cJSON_CreateObject();
-            cJSON_AddStringToObject(response, "type", "local_preview");
-            cJSON_AddStringToObject(response, "action", "start");
-
-            if (success) {
-              cJSON_AddStringToObject(response, "status", "success");
-              ESP_LOGI(TAG, "本地预览启动成功");
-            } else {
-              cJSON_AddStringToObject(response, "status", "error");
-
-              // 根据失败原因添加错误信息
-              const char *error_msg = "未知错误";
-              if (IsMonitorMode()) {
-                error_msg = "监控模式运行中";
-              } else if (face_recognition_in_progress_) {
-                error_msg = "人脸识别运行中";
-              } else {
-                auto *camera = Board::GetInstance().GetCamera();
-                if (!camera) {
-                  error_msg = "摄像头不可用";
-                }
-              }
-              cJSON_AddStringToObject(response, "error", error_msg);
-              ESP_LOGE(TAG, "本地预览启动失败: %s", error_msg);
-            }
-
-            // 发送响应
-            char *json_str = cJSON_PrintUnformatted(response);
-            if (json_str && protocol_) {
-              protocol_->SendMcpMessage(json_str);
-              cJSON_free(json_str);
-            }
-            cJSON_Delete(response);
-          });
-        } else if (strcmp(action->valuestring, "stop") == 0) {
-          // 停止本地预览
-          Schedule([this]() {
-            StopLocalPreview();
-
-            // 构造响应 JSON
-            cJSON *response = cJSON_CreateObject();
-            cJSON_AddStringToObject(response, "type", "local_preview");
-            cJSON_AddStringToObject(response, "action", "stop");
-            cJSON_AddStringToObject(response, "status", "success");
-
-            // 发送响应
-            char *json_str = cJSON_PrintUnformatted(response);
-            if (json_str && protocol_) {
-              protocol_->SendMcpMessage(json_str);
-              cJSON_free(json_str);
-            }
-            cJSON_Delete(response);
-
-            ESP_LOGI(TAG, "本地预览已停止");
-          });
-        } else {
-          ESP_LOGW(TAG, "未知的本地预览操作: %s", action->valuestring);
-        }
-      } else {
-        ESP_LOGW(TAG, "本地预览命令缺少 action 字段");
-      }
     } else if (HandleSmartLockJsonMessage(root, type->valuestring)) {
       // v5.0 协议：智能门锁扩展消息（face_result, lock_control, dev_control,
       // user_mgmt, heartbeat_ack） 已在 HandleSmartLockJsonMessage() 中处理
@@ -688,6 +628,21 @@ void Application::Start() {
 
     audio_service_.PlaySound(Lang::Sounds::OGG_SUCCESS);
   }
+
+  // =========================================================================
+  // 启动自动连接任务
+  // =========================================================================
+  ESP_LOGI(TAG, "启动自动连接任务");
+  xTaskCreate(
+      [](void *arg) {
+        ((Application *)arg)->AutoConnectLoop();
+        vTaskDelete(NULL);
+      },
+      "auto_connect", // 任务名称
+      2048 * 2,       // 栈大小 4KB
+      this,           // 参数
+      2,              // 优先级（低于主循环的 3）
+      &auto_connect_task_handle_);
 }
 
 // 添加异步任务到主循环
@@ -3124,4 +3079,180 @@ void Application::PreviewDisplayLoop() {
   }
 
   ESP_LOGI(TAG, "预览显示任务退出");
+}
+
+// ============================================================================
+// 自动连接功能实现
+// ============================================================================
+
+/**
+ * @brief 自动连接任务循环
+ *
+ * 该任务在后台持续运行，负责：
+ * 1. 检查是否需要连接服务器
+ * 2. 尝试建立连接
+ * 3. 连接失败后使用指数退避策略重试
+ * 4. 连接成功后监控连接状态
+ */
+void Application::AutoConnectLoop() {
+  ESP_LOGI(TAG, "自动连接任务已启动");
+
+  // 等待 5 秒，确保系统初始化完成
+  vTaskDelay(pdMS_TO_TICKS(5000));
+
+  while (true) {
+    // 1. 检查是否需要自动连接
+    if (ShouldAutoConnect()) {
+      ESP_LOGI(TAG, "尝试自动连接服务器 (重试次数: %d)",
+               connection_retry_count_);
+
+      // 2. 尝试连接服务器
+      bool connect_success = false;
+      if (protocol_) {
+        // 使用 Schedule 在主线程中执行连接操作
+        Schedule([this, &connect_success]() {
+          if (protocol_->OpenAudioChannel()) {
+            connect_success = true;
+            connection_retry_count_ = 0;         // 重置重试计数
+            user_manually_disconnected_ = false; // 清除手动断开标志
+            ESP_LOGI(TAG, "自动连接成功");
+          } else {
+            ESP_LOGE(TAG, "自动连接失败");
+          }
+        });
+
+        // 等待连接操作完成（最多等待 15 秒）
+        for (int i = 0; i < 30; i++) {
+          vTaskDelay(pdMS_TO_TICKS(500));
+          if (connect_success || protocol_->IsAudioChannelOpened()) {
+            break;
+          }
+        }
+      }
+
+      // 3. 根据连接结果决定下一步
+      if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        // 连接成功，监控连接状态
+        ESP_LOGI(TAG, "连接已建立，开始监控连接状态");
+
+        // ========== 连接成功后隐藏 UI（门锁模式）==========
+        auto lcd_display = dynamic_cast<LcdDisplay *>(
+            Board::GetInstance().GetDisplay());
+        if (lcd_display) {
+          lcd_display->HideAllUI();
+          ESP_LOGI(TAG, "已切换到门锁模式（UI 隐藏）");
+        }
+        // ========================================================
+
+        while (protocol_->IsAudioChannelOpened()) {
+          vTaskDelay(pdMS_TO_TICKS(5000)); // 每 5 秒检查一次
+        }
+
+        ESP_LOGW(TAG, "连接已断开");
+        connection_retry_count_ = 0; // 重置重试计数
+
+        // 等待 2 秒后再尝试重连
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+      } else {
+        // 连接失败，使用指数退避
+        connection_retry_count_++;
+        int delay_ms = CalculateRetryDelay(connection_retry_count_);
+
+        ESP_LOGW(TAG, "自动连接失败，等待 %d 毫秒后重试 (重试次数: %d)",
+                 delay_ms, connection_retry_count_);
+
+        // 分段延迟，以便及时响应状态变化
+        int delay_steps = delay_ms / 1000; // 每秒检查一次
+        for (int i = 0; i < delay_steps; i++) {
+          vTaskDelay(pdMS_TO_TICKS(1000));
+
+          // 如果用户主动断开或状态不适合连接，提前退出延迟
+          if (user_manually_disconnected_ || !ShouldAutoConnect()) {
+            ESP_LOGI(TAG, "检测到状态变化，取消重试延迟");
+            break;
+          }
+        }
+      }
+
+    } else {
+      // 不需要连接，等待 5 秒后再检查
+      vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+  }
+}
+
+/**
+ * @brief 判断是否应该自动连接
+ * @return 如果满足自动连接条件返回 true
+ */
+bool Application::ShouldAutoConnect() {
+  // 1. 检查自动连接功能是否启用
+  if (!auto_connect_enabled_) {
+    return false;
+  }
+
+  // 2. 检查 Protocol 是否已初始化
+  if (!protocol_) {
+    return false;
+  }
+
+  // 3. 检查是否已连接服务器
+  if (protocol_->IsAudioChannelOpened()) {
+    return false;
+  }
+
+  // 4. 检查用户是否主动断开连接
+  if (user_manually_disconnected_) {
+    return false;
+  }
+
+  // 5. 检查设备状态是否适合连接
+  // 只在 Idle 状态下自动连接
+  if (device_state_ != kDeviceStateIdle) {
+    return false;
+  }
+
+  // 6. 检查网络是否已连接
+  auto &board = Board::GetInstance();
+  auto network = board.GetNetwork();
+  if (!network) {
+    return false;
+  }
+
+  // 7. 检查是否处于监控模式
+  if (IsMonitorMode()) {
+    return false;
+  }
+
+  // 所有条件都满足，可以自动连接
+  return true;
+}
+
+/**
+ * @brief 计算指数退避延迟时间
+ * @param retry_count 当前重试次数
+ * @return 延迟时间（毫秒）
+ */
+int Application::CalculateRetryDelay(int retry_count) {
+  // 指数退避：1s, 2s, 4s, 8s, 16s, 32s, 60s(max)
+  int delay_ms = INITIAL_RETRY_DELAY_MS * (1 << retry_count);
+
+  // 限制最大延迟
+  if (delay_ms > MAX_RETRY_DELAY_MS) {
+    delay_ms = MAX_RETRY_DELAY_MS;
+  }
+
+  // 添加随机抖动 (±20%)，避免多设备同时重连
+  int jitter_range = delay_ms / 5; // 20% 的范围
+  int jitter = (esp_random() % (jitter_range * 2)) - jitter_range;
+
+  int final_delay = delay_ms + jitter;
+
+  // 确保延迟至少为 1 秒
+  if (final_delay < 1000) {
+    final_delay = 1000;
+  }
+
+  return final_delay;
 }

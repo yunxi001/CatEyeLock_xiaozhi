@@ -1264,14 +1264,14 @@ bool LcdDisplay::EnterPreviewMode() {
   ESP_LOGI(TAG, "进入预览模式");
 
   // 1. 隐藏所有 LVGL UI 组件
-  if (top_bar_ != nullptr) {
-    lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+  // 隐藏 container_（会自动隐藏其子对象）
+  if (container_ != nullptr) {
+    lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
   }
+
+  // 隐藏独立于 container_ 的组件
   if (status_bar_ != nullptr) {
     lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (content_ != nullptr) {
-    lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
   }
   if (bottom_bar_ != nullptr) {
     lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
@@ -1287,6 +1287,12 @@ bool LcdDisplay::EnterPreviewMode() {
   }
   if (preview_image_ != nullptr) {
     lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (side_bar_ != nullptr) {
+    lv_obj_add_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (low_battery_popup_ != nullptr) {
+    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
   }
 
   // 2. 计算 Canvas 缓冲区大小（RGB565 格式，每像素 2 字节）
@@ -1383,29 +1389,32 @@ void LcdDisplay::ExitPreviewMode() {
     ESP_LOGI(TAG, "已释放 PSRAM 缓冲区");
   }
 
-  // 4. 恢复 LVGL UI 组件显示
-  if (top_bar_ != nullptr) {
-    lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (status_bar_ != nullptr) {
-    lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (content_ != nullptr) {
-    lv_obj_remove_flag(content_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (bottom_bar_ != nullptr) {
-    lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (emoji_box_ != nullptr) {
-    lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-  }
+  // 4. 恢复 LVGL UI 组件显示（仅当 UI 未被隐藏时）
+  if (!ui_hidden_) {
+    if (container_ != nullptr) {
+      lv_obj_remove_flag(container_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (top_bar_ != nullptr) {
+      lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_bar_ != nullptr) {
+      lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (bottom_bar_ != nullptr) {
+      lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_box_ != nullptr) {
+      lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
 
-  // 根据当前状态恢复 emoji 显示
-  // 如果有 GIF 控制器，显示 emoji_image_，否则显示 emoji_label_
-  if (gif_controller_ && emoji_image_ != nullptr) {
-    lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-  } else if (emoji_label_ != nullptr) {
-    lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    // 根据当前状态恢复 emoji 显示
+    if (gif_controller_ && emoji_image_ != nullptr) {
+      lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    } else if (emoji_label_ != nullptr) {
+      lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+  } else {
+    ESP_LOGI(TAG, "UI 处于隐藏状态（门锁模式），不恢复显示");
   }
 
   // 5. 设置预览模式标志为 false
@@ -1475,3 +1484,138 @@ bool LcdDisplay::UpdatePreviewCanvas(const uint8_t *rgb565_data, uint16_t width,
 }
 
 bool LcdDisplay::IsPreviewMode() const { return preview_mode_active_; }
+
+// ============================================================================
+// 门锁模式：重写 UI 更新方法，在 UI 隐藏时跳过操作
+// ============================================================================
+
+void LcdDisplay::SetStatus(const char *status) {
+  if (ui_hidden_) {
+    return; // 门锁模式下不更新状态
+  }
+  LvglDisplay::SetStatus(status);
+}
+
+void LcdDisplay::ShowNotification(const char *notification, int duration_ms) {
+  if (ui_hidden_) {
+    return; // 门锁模式下不显示通知
+  }
+  LvglDisplay::ShowNotification(notification, duration_ms);
+}
+
+void LcdDisplay::UpdateStatusBar(bool update_all) {
+  if (ui_hidden_) {
+    return; // 门锁模式下不更新状态栏
+  }
+  LvglDisplay::UpdateStatusBar(update_all);
+}
+
+// ============================================================================
+// 门锁模式实现（智能门锁场景）
+// ============================================================================
+
+void LcdDisplay::HideAllUI() {
+  DisplayLockGuard lock(this);
+
+  if (ui_hidden_) {
+    ESP_LOGD(TAG, "UI 已经隐藏");
+    return;
+  }
+
+  ESP_LOGI(TAG, "隐藏所有 UI（门锁模式）");
+
+  // 隐藏所有 UI 组件
+  // 注意：在不同 UI 风格下，top_bar_ 可能是 container_ 的子对象，也可能是独立对象
+  // 因此需要逐个隐藏所有组件，确保覆盖所有情况
+  if (container_ != nullptr) {
+    lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (top_bar_ != nullptr) {
+    lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (content_ != nullptr) {
+    lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  // 隐藏独立于 container_ 的组件
+  if (status_bar_ != nullptr) {
+    lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (bottom_bar_ != nullptr) {
+    lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (side_bar_ != nullptr) {
+    lv_obj_add_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (emoji_box_ != nullptr) {
+    lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (emoji_label_ != nullptr) {
+    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (emoji_image_ != nullptr) {
+    lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (preview_image_ != nullptr) {
+    lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (low_battery_popup_ != nullptr) {
+    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  // 设置屏幕背景为黑色
+  auto screen = lv_screen_active();
+  lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
+
+  ui_hidden_ = true;
+  ESP_LOGI(TAG, "UI 已隐藏，屏幕黑屏");
+}
+
+void LcdDisplay::ShowAllUI() {
+  DisplayLockGuard lock(this);
+
+  if (!ui_hidden_) {
+    ESP_LOGD(TAG, "UI 已经显示");
+    return;
+  }
+
+  ESP_LOGI(TAG, "恢复所有 UI");
+
+  // 恢复所有 UI 组件（除非在预览模式）
+  if (!preview_mode_active_) {
+    if (container_ != nullptr) {
+      lv_obj_remove_flag(container_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (top_bar_ != nullptr) {
+      lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (content_ != nullptr) {
+      lv_obj_remove_flag(content_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (status_bar_ != nullptr) {
+      lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (bottom_bar_ != nullptr) {
+      lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (side_bar_ != nullptr) {
+      lv_obj_remove_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (emoji_box_ != nullptr) {
+      lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+    // emoji_label_ 和 emoji_image_ 根据需要显示
+  }
+
+  // 恢复主题背景色
+  auto screen = lv_screen_active();
+  auto lvgl_theme = static_cast<LvglTheme *>(current_theme_);
+  if (lvgl_theme) {
+    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
+  }
+
+  ui_hidden_ = false;
+  ESP_LOGI(TAG, "UI 已恢复显示");
+}
+
+bool LcdDisplay::IsUIHidden() const { return ui_hidden_; }

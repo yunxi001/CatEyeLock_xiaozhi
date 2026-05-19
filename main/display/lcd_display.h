@@ -42,6 +42,9 @@ protected:
   bool preview_mode_active_ = false;      // 预览模式标志
   lv_obj_t *preview_indicator_ = nullptr; // "预览中"指示器 label
 
+  // 门锁模式相关成员变量
+  bool ui_hidden_ = false; // UI 隐藏状态标志（门锁模式）
+
   void InitializeLcdThemes();
   void SetupUI();
   virtual bool Lock(int timeout_ms = 0) override;
@@ -54,9 +57,12 @@ protected:
 
 public:
   ~LcdDisplay();
+  virtual void SetStatus(const char *status) override;
+  virtual void ShowNotification(const char *notification, int duration_ms = 3000) override;
   virtual void SetEmotion(const char *emotion) override;
   virtual void SetChatMessage(const char *role, const char *content) override;
   virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
+  virtual void UpdateStatusBar(bool update_all = false) override;
 
   // Add theme switching function
   virtual void SetTheme(Theme *theme) override;
@@ -100,6 +106,29 @@ public:
    * @return bool 预览模式返回 true
    */
   bool IsPreviewMode() const;
+
+  // 门锁模式相关方法
+  /**
+   * @brief 隐藏所有 UI（门锁模式）
+   *
+   * 隐藏所有 LVGL UI 组件，屏幕显示黑色。
+   * 适用于智能门锁等无需常驻显示的场景。
+   */
+  void HideAllUI();
+
+  /**
+   * @brief 恢复所有 UI
+   *
+   * 恢复所有 LVGL UI 组件的显示。
+   */
+  void ShowAllUI();
+
+  /**
+   * @brief 检查 UI 是否隐藏
+   *
+   * @return bool UI 隐藏返回 true
+   */
+  bool IsUIHidden() const;
 };
 
 // SPI LCD display
