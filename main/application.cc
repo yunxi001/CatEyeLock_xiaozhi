@@ -2974,7 +2974,7 @@ void Application::PreviewCaptureLoop() {
     uint32_t capture_time_ms =
         (capture_end_tick - start_tick) * portTICK_PERIOD_MS;
 
-    ESP_LOGI(TAG, "[预览性能] 捕获+解码=%ums, 帧=%dx%d, 数据=%d bytes",
+    ESP_LOGD(TAG, "[预览性能] 捕获+解码=%ums, 帧=%dx%d, 数据=%d bytes",
              capture_time_ms, width, height, (int)data_size);
 
     // DEBUG 日志：帧捕获详情
@@ -3089,7 +3089,7 @@ void Application::PreviewDisplayLoop() {
       ESP_LOGW(TAG, "更新 Canvas 失败 (尺寸=%dx%d)", frame->width,
                frame->height);
     } else {
-      ESP_LOGI(TAG, "[预览性能] 缩放+显示=%ums, 端到端延迟=%ums",
+      ESP_LOGD(TAG, "[预览性能] 缩放+显示=%ums, 端到端延迟=%ums",
                render_time_ms, latency_ms);
     }
 

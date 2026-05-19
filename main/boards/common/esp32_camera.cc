@@ -1333,8 +1333,8 @@ bool Esp32Camera::CaptureForPreview() {
 
   // 确定帧数据大小
   size_t data_len = buf.bytesused;
-  if (data_len == 0) {
-    // JPEG 模式下 bytesused 可能为 0
+  if (data_len == 0 || (sensor_format_ == V4L2_PIX_FMT_JPEG && data_len > mmap_buffers_[buf.index].length)) {
+    // JPEG 模式下 bytesused 可能为 0 或无效值
     if (sensor_format_ == V4L2_PIX_FMT_JPEG) {
       const uint8_t *p = (const uint8_t *)mmap_buffers_[buf.index].start;
       size_t max_len = mmap_buffers_[buf.index].length;
@@ -1582,13 +1582,18 @@ bool Esp32Camera::CaptureForPreview() {
 #ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
   case V4L2_PIX_FMT_JPEG: {
     // JPEG 格式需要解码为 RGB565 才能在 LCD 上显示
-    // 先复制 JPEG 数据
+    // 使用 esp_new_jpeg 解码为 CbYCrY (YUV422)，然后手动转换为 RGB565
     memcpy(frame_.data, mmap_buffers_[buf.index].start,
            MIN(mmap_buffers_[buf.index].length, frame_.len));
 
-    // 解码为 RGB565，使用 scale 功能缩小到 320×240
+    // 将缓冲区重新放入队列（提前归还）
+    if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+      ESP_LOGE(TAG, "VIDIOC_QBUF 失败");
+    }
+
+    // 使用 esp_new_jpeg 解码为 CbYCrY，带 scale 缩小到 320×240
     jpeg_dec_config_t dec_config = DEFAULT_JPEG_DEC_CONFIG();
-    dec_config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    dec_config.output_type = JPEG_PIXEL_FORMAT_CbYCrY;
     dec_config.rotate = JPEG_ROTATE_0D;
     dec_config.scale = {.width = 320, .height = 240};
 
@@ -1601,9 +1606,6 @@ bool Esp32Camera::CaptureForPreview() {
       ESP_LOGE(TAG, "JPEG 解码器打开失败");
       heap_caps_free(frame_.data);
       frame_.data = nullptr;
-      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
-      }
       return false;
     }
 
@@ -1616,53 +1618,85 @@ bool Esp32Camera::CaptureForPreview() {
       jpeg_dec_close(jpeg_dec);
       heap_caps_free(frame_.data);
       frame_.data = nullptr;
-      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
-      }
       return false;
     }
 
-    // 解码后的尺寸（经过 scale）
     uint16_t dec_w = out_info.width;
     uint16_t dec_h = out_info.height;
-
-    // 分配 RGB565 输出缓冲区（每像素 2 字节）
-    size_t rgb565_size = dec_w * dec_h * 2;
-    uint8_t *rgb565_buf = (uint8_t *)jpeg_calloc_align(rgb565_size, 16);
-    if (!rgb565_buf) {
-      ESP_LOGE(TAG, "分配 RGB565 缓冲区失败");
+    size_t yuv_size = dec_w * dec_h * 2;
+    uint8_t *yuv_buf = (uint8_t *)jpeg_calloc_align(yuv_size, 16);
+    if (!yuv_buf) {
+      ESP_LOGE(TAG, "分配 YUV 缓冲区失败");
       jpeg_dec_close(jpeg_dec);
       heap_caps_free(frame_.data);
       frame_.data = nullptr;
-      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
-      }
       return false;
     }
 
-    jpeg_io.outbuf = rgb565_buf;
+    jpeg_io.outbuf = yuv_buf;
     jpeg_ret = jpeg_dec_process(jpeg_dec, &jpeg_io);
     jpeg_dec_close(jpeg_dec);
 
     if (jpeg_ret != JPEG_ERR_OK) {
       ESP_LOGE(TAG, "JPEG 解码失败");
-      jpeg_free_align(rgb565_buf);
+      jpeg_free_align(yuv_buf);
       heap_caps_free(frame_.data);
       frame_.data = nullptr;
-      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
-        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
-      }
       return false;
     }
 
-    // 替换帧数据
+    // 手动 YUV422 → RGB565 转换
+    // 实际字节序: [Cr, Y0, Cb, Y1] 每 4 字节表示 2 个像素
+    size_t rgb565_size = dec_w * dec_h * 2;
     heap_caps_free(frame_.data);
-    frame_.data = rgb565_buf;
+    frame_.data = (uint8_t *)heap_caps_malloc(rgb565_size,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!frame_.data) {
+      ESP_LOGE(TAG, "分配 RGB565 缓冲区失败");
+      jpeg_free_align(yuv_buf);
+      return false;
+    }
+
+    uint16_t *dst = (uint16_t *)frame_.data;
+    size_t pixel_pairs = (size_t)dec_w * dec_h / 2;
+
+    for (size_t i = 0; i < pixel_pairs; i++) {
+      uint8_t cr = yuv_buf[i * 4 + 0];
+      uint8_t y0 = yuv_buf[i * 4 + 1];
+      uint8_t cb = yuv_buf[i * 4 + 2];
+      uint8_t y1 = yuv_buf[i * 4 + 3];
+
+      int c0 = y0 - 16;
+      int c1 = y1 - 16;
+      int d = cb - 128;
+      int e = cr - 128;
+
+      int r0 = (298 * c0 + 409 * e + 128) >> 8;
+      int g0 = (298 * c0 - 100 * d - 208 * e + 128) >> 8;
+      int b0 = (298 * c0 + 516 * d + 128) >> 8;
+
+      int r1 = (298 * c1 + 409 * e + 128) >> 8;
+      int g1 = (298 * c1 - 100 * d - 208 * e + 128) >> 8;
+      int b1 = (298 * c1 + 516 * d + 128) >> 8;
+
+      r0 = r0 < 0 ? 0 : (r0 > 255 ? 255 : r0);
+      g0 = g0 < 0 ? 0 : (g0 > 255 ? 255 : g0);
+      b0 = b0 < 0 ? 0 : (b0 > 255 ? 255 : b0);
+      r1 = r1 < 0 ? 0 : (r1 > 255 ? 255 : r1);
+      g1 = g1 < 0 ? 0 : (g1 > 255 ? 255 : g1);
+      b1 = b1 < 0 ? 0 : (b1 > 255 ? 255 : b1);
+
+      dst[i * 2 + 0] = ((r0 >> 3) << 11) | ((g0 >> 2) << 5) | (b0 >> 3);
+      dst[i * 2 + 1] = ((r1 >> 3) << 11) | ((g1 >> 2) << 5) | (b1 >> 3);
+    }
+
+    jpeg_free_align(yuv_buf);
+
     frame_.len = rgb565_size;
     frame_.width = dec_w;
     frame_.height = dec_h;
     frame_.format = V4L2_PIX_FMT_RGB565;
-    break;
+    return true; // 提前返回，QBUF 已在前面执行
   }
 #endif // CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
 
