@@ -233,6 +233,33 @@ private:
             // 切换聊天状态（开始/停止录音）
             app.ToggleChatState();
         });
+
+        // 双击切换本地预览模式
+        boot_button_.OnDoubleClick([this]() {
+            auto& app = Application::GetInstance();
+            app.Schedule([&app]() {
+                if (app.IsLocalPreviewActive()) {
+                    // 正在预览，停止并关闭背光
+                    app.StopLocalPreview();
+                    auto* backlight = Board::GetInstance().GetBacklight();
+                    if (backlight) {
+                        backlight->SetBrightness(0);
+                    }
+                } else {
+                    // 未在预览，打开背光并启动预览
+                    auto* backlight = Board::GetInstance().GetBacklight();
+                    if (backlight) {
+                        backlight->RestoreBrightness();
+                    }
+                    if (!app.StartLocalPreview()) {
+                        // 启动失败，关闭背光
+                        if (backlight) {
+                            backlight->SetBrightness(0);
+                        }
+                    }
+                }
+            });
+        });
     }
 
     /**

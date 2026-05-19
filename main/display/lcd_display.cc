@@ -1446,29 +1446,43 @@ bool LcdDisplay::UpdatePreviewCanvas(const uint8_t *rgb565_data, uint16_t width,
     return false;
   }
 
-  // 4. 检查尺寸是否匹配
-  if (width != width_ || height != height_) {
-    ESP_LOGE(TAG, "图像尺寸不匹配：期望 %dx%d，实际 %dx%d", width_, height_,
-             width, height);
-    return false;
-  }
-
-  // 5. 计算数据大小
-  size_t data_size = width * height * 2; // RGB565 每像素 2 字节
-
   // 记录开始时间（用于性能监控）
   TickType_t start_tick = xTaskGetTickCount();
 
-  // 6. 将 RGB565 数据复制到 Canvas 缓冲区
-  memcpy(preview_canvas_buffer_, rgb565_data, data_size);
+  // 4. 如果尺寸匹配，直接复制；否则进行缩放（横屏显示）
+  if (width == width_ && height == height_) {
+    size_t data_size = width * height * 2;
+    memcpy(preview_canvas_buffer_, rgb565_data, data_size);
+  } else {
+    // 横屏显示：将 320×240 缩放并旋转 90° 写入 240×320 的 Canvas
+    const uint16_t *src = (const uint16_t *)rgb565_data;
+    uint16_t *dst = (uint16_t *)preview_canvas_buffer_;
+
+    // Canvas 尺寸: width_=240, height_=320
+    // 旋转 90°（顺时针）写入 240×320 的 Canvas
+    for (uint16_t dy = 0; dy < height_; dy++) {
+      uint32_t scaled_x = height_ - 1 - dy;
+      uint32_t src_x = scaled_x * width / height_;
+
+      for (uint16_t dx = 0; dx < width_; dx++) {
+        uint32_t src_y = (uint32_t)dx * height / width_;
+        uint16_t pixel = src[src_y * width + src_x];
+        // RGB565 R/B 交换：将 BBBBB_GGGGGG_RRRRR 转为 RRRRR_GGGGGG_BBBBB
+        uint16_t r = pixel & 0x1F;          // 低 5 位（原本应该是 B，实际是 R）
+        uint16_t g = (pixel >> 5) & 0x3F;   // 中间 6 位（G 不变）
+        uint16_t b = (pixel >> 11) & 0x1F;  // 高 5 位（原本应该是 R，实际是 B）
+        dst[dy * width_ + dx] = (r << 11) | (g << 5) | b;
+      }
+    }
+  }
 
   TickType_t copy_end_tick = xTaskGetTickCount();
 
-  // 7. 更新 Canvas（重新设置缓冲区以触发重绘）
+  // 5. 更新 Canvas（重新设置缓冲区以触发重绘）
   lv_canvas_set_buffer(preview_canvas_, preview_canvas_buffer_, width_, height_,
                        LV_COLOR_FORMAT_RGB565);
 
-  // 8. 触发 LVGL 重绘
+  // 6. 触发 LVGL 重绘
   lv_obj_invalidate(preview_canvas_);
 
   TickType_t end_tick = xTaskGetTickCount();
@@ -1477,8 +1491,8 @@ bool LcdDisplay::UpdatePreviewCanvas(const uint8_t *rgb565_data, uint16_t width,
   uint32_t copy_time_ms = (copy_end_tick - start_tick) * portTICK_PERIOD_MS;
   uint32_t total_time_ms = (end_tick - start_tick) * portTICK_PERIOD_MS;
   ESP_LOGD(TAG,
-           "Canvas 已更新: 复制耗时=%u ms, 总耗时=%u ms, 数据大小=%zu 字节",
-           copy_time_ms, total_time_ms, data_size);
+           "Canvas 已更新: 缩放+复制耗时=%u ms, 总耗时=%u ms, 输入=%dx%d, 输出=%dx%d",
+           copy_time_ms, total_time_ms, width, height, width_, height_);
 
   return true;
 }
@@ -1515,107 +1529,35 @@ void LcdDisplay::UpdateStatusBar(bool update_all) {
 // ============================================================================
 
 void LcdDisplay::HideAllUI() {
-  DisplayLockGuard lock(this);
-
   if (ui_hidden_) {
-    ESP_LOGD(TAG, "UI 已经隐藏");
     return;
   }
 
-  ESP_LOGI(TAG, "隐藏所有 UI（门锁模式）");
+  ESP_LOGI(TAG, "关闭背光（门锁模式）");
 
-  // 隐藏所有 UI 组件
-  // 注意：在不同 UI 风格下，top_bar_ 可能是 container_ 的子对象，也可能是独立对象
-  // 因此需要逐个隐藏所有组件，确保覆盖所有情况
-  if (container_ != nullptr) {
-    lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
+  // 直接关闭背光，屏幕变黑
+  auto *backlight = Board::GetInstance().GetBacklight();
+  if (backlight) {
+    backlight->SetBrightness(0);
   }
-  if (top_bar_ != nullptr) {
-    lv_obj_add_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (content_ != nullptr) {
-    lv_obj_add_flag(content_, LV_OBJ_FLAG_HIDDEN);
-  }
-
-  // 隐藏独立于 container_ 的组件
-  if (status_bar_ != nullptr) {
-    lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (bottom_bar_ != nullptr) {
-    lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (side_bar_ != nullptr) {
-    lv_obj_add_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (emoji_box_ != nullptr) {
-    lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (emoji_label_ != nullptr) {
-    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (emoji_image_ != nullptr) {
-    lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (preview_image_ != nullptr) {
-    lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-  }
-  if (low_battery_popup_ != nullptr) {
-    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-  }
-
-  // 设置屏幕背景为黑色
-  auto screen = lv_screen_active();
-  lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
 
   ui_hidden_ = true;
-  ESP_LOGI(TAG, "UI 已隐藏，屏幕黑屏");
 }
 
 void LcdDisplay::ShowAllUI() {
-  DisplayLockGuard lock(this);
-
   if (!ui_hidden_) {
-    ESP_LOGD(TAG, "UI 已经显示");
     return;
   }
 
-  ESP_LOGI(TAG, "恢复所有 UI");
+  ESP_LOGI(TAG, "恢复背光");
 
-  // 恢复所有 UI 组件（除非在预览模式）
-  if (!preview_mode_active_) {
-    if (container_ != nullptr) {
-      lv_obj_remove_flag(container_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (top_bar_ != nullptr) {
-      lv_obj_remove_flag(top_bar_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (content_ != nullptr) {
-      lv_obj_remove_flag(content_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (status_bar_ != nullptr) {
-      lv_obj_remove_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (bottom_bar_ != nullptr) {
-      lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (side_bar_ != nullptr) {
-      lv_obj_remove_flag(side_bar_, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (emoji_box_ != nullptr) {
-      lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-    }
-    // emoji_label_ 和 emoji_image_ 根据需要显示
-  }
-
-  // 恢复主题背景色
-  auto screen = lv_screen_active();
-  auto lvgl_theme = static_cast<LvglTheme *>(current_theme_);
-  if (lvgl_theme) {
-    lv_obj_set_style_bg_color(screen, lvgl_theme->background_color(), 0);
+  // 恢复背光
+  auto *backlight = Board::GetInstance().GetBacklight();
+  if (backlight) {
+    backlight->RestoreBrightness();
   }
 
   ui_hidden_ = false;
-  ESP_LOGI(TAG, "UI 已恢复显示");
 }
 
 bool LcdDisplay::IsUIHidden() const { return ui_hidden_; }

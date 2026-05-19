@@ -21,6 +21,7 @@
 #include "display.h"
 #include "esp32_camera.h"
 #include "esp_jpeg_common.h"
+#include "esp_jpeg_dec.h"
 #include "jpg/image_to_jpeg.h"
 #include "jpg/jpeg_to_image.h"
 #include "lvgl_display.h"
@@ -451,12 +452,35 @@ bool Esp32Camera::Capture() {
         frame_.data = nullptr;
         frame_.format = 0;
       }
-      frame_.len = buf.bytesused;
+
+      // 确定帧数据大小
+      size_t data_len = buf.bytesused;
+      if (data_len == 0) {
+        // JPEG 模式下 bytesused 可能为 0
+        if (sensor_format_ == V4L2_PIX_FMT_JPEG) {
+          const uint8_t *p = (const uint8_t *)mmap_buffers_[buf.index].start;
+          size_t max_len = mmap_buffers_[buf.index].length;
+          data_len = 0;
+          for (size_t j = 2; j < max_len - 1; j++) {
+            if (p[j] == 0xFF && p[j + 1] == 0xD9) {
+              data_len = j + 2;
+              break;
+            }
+          }
+          if (data_len == 0) {
+            data_len = max_len;
+          }
+        } else {
+          data_len = mmap_buffers_[buf.index].length;
+        }
+      }
+
+      frame_.len = data_len;
       frame_.data = (uint8_t *)heap_caps_malloc(
           frame_.len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
       if (!frame_.data) {
         ESP_LOGE(TAG, "alloc frame copy failed: need allocate %d bytes",
-                 buf.bytesused);
+                 (int)data_len);
         if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
           ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
         }
@@ -1162,12 +1186,42 @@ bool Esp32Camera::CaptureForStream() {
     frame_.data = nullptr;
     frame_.format = 0;
   }
-  frame_.len = buf.bytesused;
+
+  // 确定帧数据大小
+  size_t data_len = buf.bytesused;
+  if (data_len == 0) {
+    // JPEG 模式下 bytesused 可能为 0
+    // 对于 JPEG 格式，通过从头部向后查找 EOI 标记 (0xFF 0xD9) 确定实际数据大小
+    if (sensor_format_ == V4L2_PIX_FMT_JPEG) {
+      const uint8_t *p = (const uint8_t *)mmap_buffers_[buf.index].start;
+      size_t max_len = mmap_buffers_[buf.index].length;
+      data_len = 0;
+      // 从 SOI (0xFF 0xD8) 之后开始向后搜索 EOI (0xFF 0xD9)
+      for (size_t i = 2; i < max_len - 1; i++) {
+        if (p[i] == 0xFF && p[i + 1] == 0xD9) {
+          data_len = i + 2;
+          break;
+        }
+      }
+      if (data_len == 0) {
+        // 未找到 EOI 标记，使用整个 buffer
+        ESP_LOGW(TAG, "JPEG EOI not found, using full buffer");
+        data_len = max_len;
+      } else {
+        ESP_LOGD(TAG, "JPEG frame size: %d bytes (buffer: %d)",
+                 (int)data_len, (int)max_len);
+      }
+    } else {
+      data_len = mmap_buffers_[buf.index].length;
+    }
+  }
+
+  frame_.len = data_len;
   frame_.data = (uint8_t *)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM |
                                                             MALLOC_CAP_8BIT);
   if (!frame_.data) {
     ESP_LOGE(TAG, "alloc frame copy failed: need allocate %d bytes",
-             buf.bytesused);
+             (int)data_len);
     if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
       ESP_LOGE(TAG, "Cleanup: VIDIOC_QBUF failed");
     }
@@ -1276,11 +1330,34 @@ bool Esp32Camera::CaptureForPreview() {
     frame_.data = nullptr;
     frame_.format = 0;
   }
-  frame_.len = buf.bytesused;
+
+  // 确定帧数据大小
+  size_t data_len = buf.bytesused;
+  if (data_len == 0) {
+    // JPEG 模式下 bytesused 可能为 0
+    if (sensor_format_ == V4L2_PIX_FMT_JPEG) {
+      const uint8_t *p = (const uint8_t *)mmap_buffers_[buf.index].start;
+      size_t max_len = mmap_buffers_[buf.index].length;
+      data_len = 0;
+      for (size_t i = 2; i < max_len - 1; i++) {
+        if (p[i] == 0xFF && p[i + 1] == 0xD9) {
+          data_len = i + 2;
+          break;
+        }
+      }
+      if (data_len == 0) {
+        data_len = max_len;
+      }
+    } else {
+      data_len = mmap_buffers_[buf.index].length;
+    }
+  }
+
+  frame_.len = data_len;
   frame_.data = (uint8_t *)heap_caps_malloc(frame_.len, MALLOC_CAP_SPIRAM |
                                                             MALLOC_CAP_8BIT);
   if (!frame_.data) {
-    ESP_LOGE(TAG, "分配帧缓冲区失败: 需要 %d 字节", buf.bytesused);
+    ESP_LOGE(TAG, "分配帧缓冲区失败: 需要 %d 字节", (int)data_len);
     if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
       ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
     }
@@ -1501,6 +1578,93 @@ bool Esp32Camera::CaptureForPreview() {
     frame_.format = V4L2_PIX_FMT_RGB565;
     break;
   }
+
+#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
+  case V4L2_PIX_FMT_JPEG: {
+    // JPEG 格式需要解码为 RGB565 才能在 LCD 上显示
+    // 先复制 JPEG 数据
+    memcpy(frame_.data, mmap_buffers_[buf.index].start,
+           MIN(mmap_buffers_[buf.index].length, frame_.len));
+
+    // 解码为 RGB565，使用 scale 功能缩小到 320×240
+    jpeg_dec_config_t dec_config = DEFAULT_JPEG_DEC_CONFIG();
+    dec_config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    dec_config.rotate = JPEG_ROTATE_0D;
+    dec_config.scale = {.width = 320, .height = 240};
+
+    jpeg_dec_handle_t jpeg_dec = NULL;
+    jpeg_dec_io_t jpeg_io = {0};
+    jpeg_dec_header_info_t out_info = {0};
+
+    jpeg_error_t jpeg_ret = jpeg_dec_open(&dec_config, &jpeg_dec);
+    if (jpeg_ret != JPEG_ERR_OK) {
+      ESP_LOGE(TAG, "JPEG 解码器打开失败");
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    jpeg_io.inbuf = frame_.data;
+    jpeg_io.inbuf_len = (int)frame_.len;
+
+    jpeg_ret = jpeg_dec_parse_header(jpeg_dec, &jpeg_io, &out_info);
+    if (jpeg_ret != JPEG_ERR_OK) {
+      ESP_LOGE(TAG, "JPEG 头解析失败");
+      jpeg_dec_close(jpeg_dec);
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    // 解码后的尺寸（经过 scale）
+    uint16_t dec_w = out_info.width;
+    uint16_t dec_h = out_info.height;
+
+    // 分配 RGB565 输出缓冲区（每像素 2 字节）
+    size_t rgb565_size = dec_w * dec_h * 2;
+    uint8_t *rgb565_buf = (uint8_t *)jpeg_calloc_align(rgb565_size, 16);
+    if (!rgb565_buf) {
+      ESP_LOGE(TAG, "分配 RGB565 缓冲区失败");
+      jpeg_dec_close(jpeg_dec);
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    jpeg_io.outbuf = rgb565_buf;
+    jpeg_ret = jpeg_dec_process(jpeg_dec, &jpeg_io);
+    jpeg_dec_close(jpeg_dec);
+
+    if (jpeg_ret != JPEG_ERR_OK) {
+      ESP_LOGE(TAG, "JPEG 解码失败");
+      jpeg_free_align(rgb565_buf);
+      heap_caps_free(frame_.data);
+      frame_.data = nullptr;
+      if (ioctl(video_fd_, VIDIOC_QBUF, &buf) != 0) {
+        ESP_LOGE(TAG, "清理: VIDIOC_QBUF 失败");
+      }
+      return false;
+    }
+
+    // 替换帧数据
+    heap_caps_free(frame_.data);
+    frame_.data = rgb565_buf;
+    frame_.len = rgb565_size;
+    frame_.width = dec_w;
+    frame_.height = dec_h;
+    frame_.format = V4L2_PIX_FMT_RGB565;
+    break;
+  }
+#endif // CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
 
   default:
     ESP_LOGE(TAG, "不支持的传感器格式用于本地预览: 0x%08x", sensor_format_);

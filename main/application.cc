@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <cstring>
+#include <ctime>
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <font_awesome.h>
@@ -465,12 +466,12 @@ void Application::Start() {
                protocol_->server_sample_rate(), codec->output_sample_rate());
     }
 
-    // 连接服务器成功后隐藏 UI（门锁模式）
+    // 连接服务器成功后关闭背光（门锁模式）
     auto display = Board::GetInstance().GetDisplay();
     auto lcd_display = dynamic_cast<LcdDisplay *>(display);
     if (lcd_display) {
       lcd_display->HideAllUI();
-      ESP_LOGI(TAG, "已切换到门锁模式（UI 隐藏）");
+      ESP_LOGI(TAG, "已切换到门锁模式（背光关闭）");
     }
   });
   protocol_->OnAudioChannelClosed([this, &board]() {
@@ -619,6 +620,21 @@ void Application::Start() {
   SetDeviceState(kDeviceStateIdle);
 
   has_server_time_ = ota.HasServerTime();
+
+  // 如果成功获取服务器时间且锁控服务可用，向 STM32 同步当前时间
+  if (has_server_time_ && lock_control_) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    lock_control_->SendSyncTime(
+        (uint8_t)timeinfo.tm_hour,
+        (uint8_t)timeinfo.tm_min,
+        (uint8_t)timeinfo.tm_sec);
+    ESP_LOGI(TAG, "已向 STM32 同步时间: %02d:%02d:%02d",
+             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+  }
+
   if (protocol_started) {
     std::string message =
         std::string(Lang::Strings::VERSION) + ota.GetCurrentVersion();
@@ -2770,7 +2786,10 @@ bool Application::StartLocalPreview() {
     return false;
   }
 
-  // 7. 创建 Capture Task（优先级 5，栈 4096）
+  // 7. 设置活动标志（必须在创建任务之前，否则任务循环条件不满足会立即退出）
+  local_preview_active_ = true;
+
+  // 8. 创建 Capture Task（优先级 5，栈 4096）
   BaseType_t ret = xTaskCreate(
       [](void *param) {
         Application *app = static_cast<Application *>(param);
@@ -2781,13 +2800,14 @@ bool Application::StartLocalPreview() {
 
   if (ret != pdPASS) {
     ESP_LOGE(TAG, "无法创建捕获任务");
+    local_preview_active_ = false;
     vQueueDelete(preview_frame_queue_);
     preview_frame_queue_ = nullptr;
     Alert("错误", "系统错误", "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
     return false;
   }
 
-  // 8. 创建 Display Task（优先级 5，栈 4096）
+  // 9. 创建 Display Task（优先级 5，栈 4096）
   ret = xTaskCreate(
       [](void *param) {
         Application *app = static_cast<Application *>(param);
@@ -2808,15 +2828,12 @@ bool Application::StartLocalPreview() {
     return false;
   }
 
-  // 9. 切换显示模式
+  // 10. 切换显示模式
   auto display = board.GetDisplay();
   auto lcd_display = dynamic_cast<LcdDisplay *>(display);
   if (lcd_display && !lcd_display->EnterPreviewMode()) {
     ESP_LOGW(TAG, "无法进入预览模式，但继续运行");
   }
-
-  // 10. 设置活动标志
-  local_preview_active_ = true;
 
   // 11. 播放确认音效
   ESP_LOGI(TAG, "本地预览已启动");
@@ -2906,7 +2923,7 @@ void Application::PreviewCaptureLoop() {
 
   int consecutive_failures = 0;
   const int MAX_FAILURES = 10;
-  const TickType_t FRAME_INTERVAL = pdMS_TO_TICKS(66); // 15 FPS
+  const TickType_t FRAME_INTERVAL = pdMS_TO_TICKS(100); // 10 FPS
 
   auto &board = Board::GetInstance();
 
@@ -2916,7 +2933,7 @@ void Application::PreviewCaptureLoop() {
     auto camera = board.GetCamera();
     auto esp32_camera = dynamic_cast<Esp32Camera *>(camera);
 
-    // 捕获帧
+    // 捕获帧（包含 JPEG 解码 + RGB888→RGB565 转换）
     if (!esp32_camera || !esp32_camera->CaptureForPreview()) {
       consecutive_failures++;
       ESP_LOGW(TAG, "帧捕获失败 (%d/%d)", consecutive_failures, MAX_FAILURES);
@@ -2946,8 +2963,8 @@ void Application::PreviewCaptureLoop() {
     uint16_t height = esp32_camera->GetFrameHeight();
 
     if (rgb565_data == nullptr || data_size == 0) {
-      ESP_LOGW(TAG, "捕获的帧数据无效 (data=%p, size=%zu)", rgb565_data,
-               data_size);
+      ESP_LOGW(TAG, "捕获的帧数据无效 (data=%p, size=%d)", rgb565_data,
+               (int)data_size);
       vTaskDelay(FRAME_INTERVAL);
       continue;
     }
@@ -2956,6 +2973,9 @@ void Application::PreviewCaptureLoop() {
     TickType_t capture_end_tick = xTaskGetTickCount();
     uint32_t capture_time_ms =
         (capture_end_tick - start_tick) * portTICK_PERIOD_MS;
+
+    ESP_LOGI(TAG, "[预览性能] 捕获+解码=%ums, 帧=%dx%d, 数据=%d bytes",
+             capture_time_ms, width, height, (int)data_size);
 
     // DEBUG 日志：帧捕获详情
     ESP_LOGD(TAG, "帧已捕获: %dx%d, 大小=%zu 字节, 耗时=%u ms, 时间戳=%u",
@@ -3069,9 +3089,8 @@ void Application::PreviewDisplayLoop() {
       ESP_LOGW(TAG, "更新 Canvas 失败 (尺寸=%dx%d)", frame->width,
                frame->height);
     } else {
-      // DEBUG 日志：帧显示详情
-      ESP_LOGD(TAG, "帧已显示: 渲染耗时=%u ms, 总耗时=%u ms, 端到端延迟=%u ms",
-               render_time_ms, total_time_ms, latency_ms);
+      ESP_LOGI(TAG, "[预览性能] 缩放+显示=%ums, 端到端延迟=%ums",
+               render_time_ms, latency_ms);
     }
 
     // 释放帧内存
@@ -3135,12 +3154,12 @@ void Application::AutoConnectLoop() {
         // 连接成功，监控连接状态
         ESP_LOGI(TAG, "连接已建立，开始监控连接状态");
 
-        // ========== 连接成功后隐藏 UI（门锁模式）==========
+        // ========== 连接成功后关闭背光（门锁模式）==========
         auto lcd_display = dynamic_cast<LcdDisplay *>(
             Board::GetInstance().GetDisplay());
         if (lcd_display) {
           lcd_display->HideAllUI();
-          ESP_LOGI(TAG, "已切换到门锁模式（UI 隐藏）");
+          ESP_LOGI(TAG, "已切换到门锁模式（背光关闭）");
         }
         // ========================================================
 
